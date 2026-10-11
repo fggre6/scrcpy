@@ -1,0 +1,103 @@
+name: Build scrcpy Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: '版本名称（可选，用于命名产物）'
+        required: false
+        default: 'custom'
+
+env:
+  SCRCPY_VERSION: '3.2'          # 与你源码匹配的 scrcpy 版本号
+  PREBUILT_SERVER_URL: 'https://github.com/Genymobile/scrcpy/releases/download/v3.2/scrcpy-server-v3.2'
+
+jobs:
+  # ==================== 编译 Windows 客户端 ====================
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            gcc git pkg-config meson ninja-build \
+            mingw-w64 mingw-w64-tools libz-mingw-w64-dev \
+            libsdl2-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswresample-dev libusb-1.0-0-dev
+
+      - name: 下载预编译服务端
+        run: |
+          wget "$PREBUILT_SERVER_URL" -O scrcpy-server
+          ls -lh scrcpy-server
+
+      - name: 配置 Meson（交叉编译 Windows 64 位）
+        run: |
+          meson setup build --cross-file=cross_win64.txt \
+            --buildtype=release --strip \
+            -Db_lto=true \
+            -Dprebuilt_server=../scrcpy-server \
+            -Dcompile_server=false
+
+      - name: 编译
+        run: ninja -C build
+
+      - name: 收集产物
+        run: |
+          mkdir -p output
+          cp build/app/scrcpy.exe output/scrcpy.exe
+          cp scrcpy-server output/scrcpy-server
+          ls -lh output/
+
+      - name: 上传 Windows 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-win64-${{ github.event.inputs.version_name || 'custom' }}
+          path: output/
+
+  # ==================== 编译 Linux 客户端 ====================
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            gcc git pkg-config meson ninja-build \
+            libsdl2-dev libavcodec-dev libavformat-dev \
+            libavutil-dev libswresample-dev libusb-1.0-0-dev
+
+      - name: 下载预编译服务端
+        run: |
+          wget "$PREBUILT_SERVER_URL" -O scrcpy-server
+          ls -lh scrcpy-server
+
+      - name: 配置 Meson（编译 Linux 原生客户端）
+        run: |
+          meson setup build --buildtype=release --strip \
+            -Db_lto=true \
+            -Dprebuilt_server=../scrcpy-server \
+            -Dcompile_server=false
+
+      - name: 编译
+        run: ninja -C build
+
+      - name: 收集产物
+        run: |
+          mkdir -p output
+          cp build/app/scrcpy output/scrcpy
+          cp scrcpy-server output/scrcpy-server
+          chmod +x output/scrcpy
+          ls -lh output/
+
+      - name: 上传 Linux 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-linux-x86_64-${{ github.event.inputs.version_name || 'custom' }}
+          path: output/
