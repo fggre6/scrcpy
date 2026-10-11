@@ -14,6 +14,71 @@
 #include "util/log.h"
 #include "util/sdl.h"
 
+// ==================== 自定义按键坐标映射 ====================
+// 坐标是 Android 屏幕坐标系下的像素值（对应 frame_size）
+// 每个按键分配一个独立的 pointer_id，用来支持多键同时按下
+
+#define CUSTOM_MAPPING_COUNT 13
+
+struct sc_custom_mapping {
+    SDL_Keycode keycode;
+    int32_t x;
+    int32_t y;
+    // pointer_id 用负数唯一标识每个虚拟手指，避免多键互抢
+    uint64_t pointer_id;
+    bool down;  // 当前是否处于按下状态
+};
+
+static struct sc_custom_mapping custom_mappings[CUSTOM_MAPPING_COUNT] = {
+    { SDLK_w,      306,  651, (uint64_t)-10, false },
+    { SDLK_d,      398,  743, (uint64_t)-11, false },
+    { SDLK_a,      207,  748, (uint64_t)-12, false },
+    { SDLK_s,      292,  829, (uint64_t)-13, false },
+    { SDLK_q,     1439,  700, (uint64_t)-14, false },
+    { SDLK_e,     1414,  864, (uint64_t)-15, false },
+    { SDLK_r,     1320,  783, (uint64_t)-16, false },
+    { SDLK_LSHIFT,1679,  858, (uint64_t)-17, false },
+    { SDLK_RSHIFT,1679,  858, (uint64_t)-18, false },
+    { SDLK_SPACE, 1693,  708, (uint64_t)-19, false },
+    { SDLK_1,     1724,  324, (uint64_t)-20, false },
+    { SDLK_2,     1718,  436, (uint64_t)-21, false },
+    { SDLK_t,     1564,  638, (uint64_t)-22, false },
+};
+// 注意：Escape 单独处理，见下
+
+static struct sc_custom_mapping *find_mapping(SDL_Keycode keycode) {
+    for (int i = 0; i < CUSTOM_MAPPING_COUNT; ++i) {
+        if (custom_mappings[i].keycode == keycode) {
+            return &custom_mappings[i];
+        }
+    }
+    return NULL;
+}
+
+// 发送一个带坐标的触摸事件（不依赖物理鼠标）
+static bool
+inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
+                int32_t x, int32_t y, uint64_t pointer_id) {
+    bool up = action == AMOTION_EVENT_ACTION_UP;
+
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+    msg.inject_touch_event.action = action;
+    msg.inject_touch_event.position.screen_size = im->screen->frame_size;
+    msg.inject_touch_event.position.point.x = x;
+    msg.inject_touch_event.position.point.y = y;
+    msg.inject_touch_event.pointer_id = pointer_id;
+    msg.inject_touch_event.pressure = up ? 0.0f : 1.0f;
+    msg.inject_touch_event.action_button = 0;
+    msg.inject_touch_event.buttons = 0;
+
+    if (!sc_controller_push_msg(im->controller, &msg)) {
+        LOGW("Could not request 'inject custom touch event'");
+        return false;
+    }
+    return true;
+}
+
 void
 sc_input_manager_init(struct sc_input_manager *im,
                       const struct sc_input_manager_params *params) {
@@ -425,6 +490,34 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     SDL_Keycode sdl_keycode = event->key;
     uint16_t mod = sc_sdl_mod_normalize(event->mod);
     bool down = event->type == SDL_EVENT_KEY_DOWN;
+      // ==================== 拦截自定义按键映射 ====================
+    // 控制器不可用、暂停、断开时不处理
+    if (im->controller && !im->screen->paused && !im->disconnected && !im->camera) {
+        // Escape 单独处理（也可加到映射表里，这里保留用户原有行为）
+        if (sdl_keycode == SDLK_ESCAPE) {
+            enum android_motionevent_action action = down
+                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+            inject_touch_at(im, action, 1774, 154, (uint64_t)-23);
+            return;
+        }
+
+        struct sc_custom_mapping *m = find_mapping(sdl_keycode);
+        if (m) {
+            // 忽略键盘自动重复，只处理首次按下和释放
+            if (down && repeat) {
+                return;
+            }
+            // 避免重复 DOWN / 重复 UP
+            if (down && m->down) return;
+            if (!down && !m->down) return;
+
+            enum android_motionevent_action action = down
+                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+            inject_touch_at(im, action, m->x, m->y, m->pointer_id);
+            m->down = down;
+            return;  // 不再把按键转发给手机
+        }
+    }
     bool ctrl = mod & SDL_KMOD_CTRL;
     bool shift = mod & SDL_KMOD_SHIFT;
     bool repeat = event->repeat;
@@ -842,7 +935,19 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     if (im->camera || im->disconnected) {
         return;
     }
+    // ==================== 拦截鼠标右键 ====================
+    if (event->button == SDL_BUTTON_RIGHT && im->controller
+            && !im->screen->paused && !im->disconnected && !im->camera) {
+        bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+        static bool right_down = false;
+        if (down == right_down) return;  // 去重
+        right_down = down;
 
+        enum android_motionevent_action action = down
+            ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+        inject_touch_at(im, action, 1679, 858, (uint64_t)-24);
+        return;
+    }
     if (event->which == SDL_TOUCH_MOUSEID) {
         // simulated from touch events, so it's a duplicate
         return;
