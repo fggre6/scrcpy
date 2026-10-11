@@ -3,69 +3,26 @@ name: Build scrcpy Client
 on:
   workflow_dispatch:
     inputs:
-      version_name:
-        description: '版本名称（可选，用于命名产物）'
+      tag_name:
+        description: 'Release 标签名（如 v1.0，留空则自动生成）'
         required: false
-        default: 'custom'
+        default: ''
+
+permissions:
+  contents: write   # 创建 Release 需要写权限
 
 env:
-  SCRCPY_VERSION: '3.2'          # 与你源码匹配的 scrcpy 版本号
+  SCRCPY_VERSION: '5.0.1'
   PREBUILT_SERVER_URL: 'https://github.com/Genymobile/scrcpy/releases/download/v3.2/scrcpy-server-v3.2'
 
 jobs:
-  # ==================== 编译 Windows 客户端 ====================
-  build-windows:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出源码
-        uses: actions/checkout@v4
-
-      - name: 安装系统依赖
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            gcc git pkg-config meson ninja-build \
-            mingw-w64 mingw-w64-tools libz-mingw-w64-dev \
-            libsdl2-dev libavcodec-dev libavformat-dev \
-            libavutil-dev libswresample-dev libusb-1.0-0-dev
-
-      - name: 下载预编译服务端
-        run: |
-          wget "$PREBUILT_SERVER_URL" -O scrcpy-server
-          ls -lh scrcpy-server
-
-      - name: 配置 Meson（交叉编译 Windows 64 位）
-        run: |
-          meson setup build --cross-file=cross_win64.txt \
-            --buildtype=release --strip \
-            -Db_lto=true \
-            -Dprebuilt_server=../scrcpy-server \
-            -Dcompile_server=false
-
-      - name: 编译
-        run: ninja -C build
-
-      - name: 收集产物
-        run: |
-          mkdir -p output
-          cp build/app/scrcpy.exe output/scrcpy.exe
-          cp scrcpy-server output/scrcpy-server
-          ls -lh output/
-
-      - name: 上传 Windows 产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: scrcpy-win64-${{ github.event.inputs.version_name || 'custom' }}
-          path: output/
-
-  # ==================== 编译 Linux 客户端 ====================
+  # ==================== Linux 原生编译 ====================
   build-linux:
     runs-on: ubuntu-22.04
     steps:
-      - name: 检出源码
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 安装系统依赖
+      - name: 安装依赖
         run: |
           sudo apt update
           sudo apt install -y \
@@ -78,26 +35,128 @@ jobs:
           wget "$PREBUILT_SERVER_URL" -O scrcpy-server
           ls -lh scrcpy-server
 
-      - name: 配置 Meson（编译 Linux 原生客户端）
+      - name: 配置 Meson（原生构建）
         run: |
           meson setup build --buildtype=release --strip \
             -Db_lto=true \
-            -Dprebuilt_server=../scrcpy-server \
+            -Dprebuilt_server=$(pwd)/scrcpy-server \
             -Dcompile_server=false
 
       - name: 编译
         run: ninja -C build
 
-      - name: 收集产物
+      - name: 打包
         run: |
-          mkdir -p output
-          cp build/app/scrcpy output/scrcpy
-          cp scrcpy-server output/scrcpy-server
-          chmod +x output/scrcpy
-          ls -lh output/
+          mkdir -p dist/scrcpy-linux-x86_64
+          cp build/app/scrcpy dist/scrcpy-linux-x86_64/scrcpy
+          cp scrcpy-server dist/scrcpy-linux-x86_64/scrcpy-server
+          chmod +x dist/scrcpy-linux-x86_64/scrcpy
+          cd dist
+          tar -czf scrcpy-linux-x86_64.tar.gz scrcpy-linux-x86_64
 
-      - name: 上传 Linux 产物
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: scrcpy-linux-x86_64-${{ github.event.inputs.version_name || 'custom' }}
-          path: output/
+          name: linux-package
+          path: dist/scrcpy-linux-x86_64.tar.gz
+
+  # ==================== Windows 编译（MSYS2） ====================
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-libusb
+            zip
+
+      - name: 下载预编译服务端
+        run: |
+          wget "$PREBUILT_SERVER_URL" -O scrcpy-server
+          ls -lh scrcpy-server
+
+      - name: 配置 Meson
+        run: |
+          meson setup build --buildtype=release --strip \
+            -Db_lto=true \
+            -Dprebuilt_server=$(pwd)/scrcpy-server \
+            -Dcompile_server=false
+
+      - name: 编译
+        run: ninja -C build
+
+      - name: 打包
+        run: |
+          mkdir -p dist/scrcpy-win64
+          cp build/app/scrcpy.exe dist/scrcpy-win64/scrcpy.exe
+          cp scrcpy-server dist/scrcpy-win64/scrcpy-server
+          # 收集运行时需要的 MinGW DLL
+          ldd build/app/scrcpy.exe | grep mingw64 | awk '{print $3}' | xargs -I{} cp {} dist/scrcpy-win64/ || true
+          cd dist
+          zip -r scrcpy-win64.zip scrcpy-win64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: dist/scrcpy-win64.zip
+
+  # ==================== 创建 Release 并上传产物 ====================
+  release:
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 列出产物文件
+        run: find artifacts -type f -exec ls -lh {} \;
+
+      - name: 生成标签名
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 创建 Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "scrcpy Custom Build ${{ steps.tag.outputs.tag }}"
+          body: |
+            ## scrcpy 自定义按键映射版本
+
+            基于 scrcpy 源码编译，添加了按键到屏幕坐标的触摸注入功能。
+
+            ### 下载
+            - **Windows (64 位)**：`scrcpy-win64.zip`
+            - **Linux (x86_64)**：`scrcpy-linux-x86_64.tar.gz`
+
+            ### 使用
+            解压后直接运行 `scrcpy.exe`（Windows）或 `./scrcpy`（Linux），
+            连接已开启 USB 调试的手机即可。
+
+            编译时间：${{ github.event.repository.updated_at }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/linux-package/scrcpy-linux-x86_64.tar.gz
+            artifacts/windows-package/scrcpy-win64.zip
