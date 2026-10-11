@@ -15,8 +15,8 @@
 #include "util/sdl.h"
 
 // ==================== 自定义按键坐标映射 ====================
-// 坐标是 Android 屏幕坐标系下的像素值（对应 frame_size）
-// 每个按键分配一个独立的 pointer_id，用来支持多键同时按下
+// 坐标是手机屏幕坐标（frame 坐标），手机横屏下为 2400x1072
+// 每个按键分配独立的 pointer_id，避免多键同时按下时互抢
 
 #define CUSTOM_MAPPING_COUNT 13
 
@@ -24,29 +24,34 @@ struct sc_custom_mapping {
     SDL_Keycode keycode;
     int32_t x;
     int32_t y;
-    // pointer_id 用负数唯一标识每个虚拟手指，避免多键互抢
     uint64_t pointer_id;
-    bool down;  // 当前是否处于按下状态
+    bool down;
 };
 
 static struct sc_custom_mapping custom_mappings[CUSTOM_MAPPING_COUNT] = {
-    { SDLK_W,      306,  651, (uint64_t)-10, false },
-    { SDLK_D,      398,  743, (uint64_t)-11, false },
-    { SDLK_A,      207,  748, (uint64_t)-12, false },
-    { SDLK_S,      292,  829, (uint64_t)-13, false },
-    { SDLK_Q,     1439,  700, (uint64_t)-14, false },
-    { SDLK_E,     1414,  864, (uint64_t)-15, false },
-    { SDLK_R,     1320,  783, (uint64_t)-16, false },
-    { SDLK_LSHIFT,1679,  858, (uint64_t)-17, false },
-    { SDLK_RSHIFT,1679,  858, (uint64_t)-18, false },
-    { SDLK_SPACE, 1693,  708, (uint64_t)-19, false },
-    { SDLK_1,     1724,  324, (uint64_t)-20, false },
-    { SDLK_2,     1718,  436, (uint64_t)-21, false },
-    { SDLK_T,     1564,  638, (uint64_t)-22, false },
+    { SDLK_W,       378, 678, (uint64_t)-10, false },
+    { SDLK_A,       268, 805, (uint64_t)-11, false },
+    { SDLK_S,       373, 979, (uint64_t)-12, false },
+    { SDLK_D,       501, 808, (uint64_t)-13, false },
+    { SDLK_LSHIFT, 2112, 919, (uint64_t)-14, false },
+    { SDLK_RSHIFT, 2112, 919, (uint64_t)-15, false },
+    { SDLK_SPACE,  2117, 735, (uint64_t)-16, false },
+    { SDLK_1,      2173, 267, (uint64_t)-17, false },
+    { SDLK_2,      2173, 395, (uint64_t)-18, false },
+    { SDLK_T,      1948, 663, (uint64_t)-19, false },
+    { SDLK_Q,      1776, 747, (uint64_t)-20, false },
+    { SDLK_E,      1781, 938, (uint64_t)-21, false },
+    { SDLK_R,      1659, 855, (uint64_t)-22, false },
 };
-// 注意：Escape 单独处理，见下
 
-static struct sc_custom_mapping *find_mapping(SDL_Keycode keycode) {
+// 左 Alt 切换左键锁定状态
+static bool g_left_click_locked = false;
+static bool g_left_click_locked_down = false;
+// 右键状态（用于去重）
+static bool g_right_click_down = false;
+
+static struct sc_custom_mapping *
+find_mapping(SDL_Keycode keycode) {
     for (int i = 0; i < CUSTOM_MAPPING_COUNT; ++i) {
         if (custom_mappings[i].keycode == keycode) {
             return &custom_mappings[i];
@@ -55,7 +60,7 @@ static struct sc_custom_mapping *find_mapping(SDL_Keycode keycode) {
     return NULL;
 }
 
-// 发送一个带坐标的触摸事件（不依赖物理鼠标）
+// 直接发送手机坐标的触摸事件，不做窗口坐标转换
 static bool
 inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
                 int32_t x, int32_t y, uint64_t pointer_id) {
@@ -78,6 +83,8 @@ inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action act
     }
     return true;
 }
+// ==================== 自定义映射结束 ====================
+
 
 void
 sc_input_manager_init(struct sc_input_manager *im,
@@ -493,22 +500,37 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     bool ctrl = mod & SDL_KMOD_CTRL;
     bool shift = mod & SDL_KMOD_SHIFT;
     bool repeat = event->repeat;
-    // ==================== 拦截自定义按键映射 ====================
-    if (im->controller && !im->screen->paused && !im->disconnected && !im->camera) {
-        if (sdl_keycode == SDLK_ESCAPE) {
-            enum android_motionevent_action action = down
-                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            inject_touch_at(im, action, 1774, 154, (uint64_t)-23);
+
+    // ==================== 自定义拦截（必须放在所有快捷键处理之前） ====================
+    if (control && !paused && !disconnected && !im->camera) {
+        // 左 Alt 切换左键锁定（仅在单独按下左 Alt 时切换）
+        if (sdl_keycode == SDLK_LALT && down && !repeat && !ctrl && !shift) {
+            g_left_click_locked = !g_left_click_locked;
+            g_left_click_locked_down = false;
+            LOGI("Left click lock: %s", g_left_click_locked ? "ON" : "OFF");
             return;
         }
 
+        // Escape 映射
+        if (sdl_keycode == SDLK_ESCAPE) {
+            enum android_motionevent_action action = down
+                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+            inject_touch_at(im, action, 2236, 53, (uint64_t)-23);
+            return;
+        }
+
+        // 其他映射键
         struct sc_custom_mapping *m = find_mapping(sdl_keycode);
         if (m) {
             if (down && repeat) {
                 return;
             }
-            if (down && m->down) return;
-            if (!down && !m->down) return;
+            if (down && m->down) {
+                return;
+            }
+            if (!down && !m->down) {
+                return;
+            }
 
             enum android_motionevent_action action = down
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
@@ -517,6 +539,7 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             return;
         }
     }
+    // ==================== 自定义拦截结束 ====================
 
     // Either the modifier includes a shortcut modifier, or the key
     // press/release is a modifier key.
@@ -931,19 +954,7 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     if (im->camera || im->disconnected) {
         return;
     }
-    // ==================== 拦截鼠标右键 ====================
-    if (event->button == SDL_BUTTON_RIGHT && im->controller
-            && !im->screen->paused && !im->disconnected && !im->camera) {
-        bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-        static bool right_down = false;
-        if (down == right_down) return;  // 去重
-        right_down = down;
 
-        enum android_motionevent_action action = down
-            ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-        inject_touch_at(im, action, 1679, 858, (uint64_t)-24);
-        return;
-    }
     if (event->which == SDL_TOUCH_MOUSEID) {
         // simulated from touch events, so it's a duplicate
         return;
@@ -952,6 +963,34 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool control = im->controller;
     bool paused = im->screen->paused;
     bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+
+    // ==================== 自定义鼠标拦截 ====================
+    if (control && !paused && !im->camera) {
+        // 左键锁定模式下，左键固定点击指定坐标
+        if (event->button == SDL_BUTTON_LEFT && g_left_click_locked) {
+            if (down == g_left_click_locked_down) {
+                return;
+            }
+            g_left_click_locked_down = down;
+            enum android_motionevent_action action = down
+                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+            inject_touch_at(im, action, 1953, 826, (uint64_t)-25);
+            return;
+        }
+
+        // 右键固定映射
+        if (event->button == SDL_BUTTON_RIGHT) {
+            if (down == g_right_click_down) {
+                return;
+            }
+            g_right_click_down = down;
+            enum android_motionevent_action action = down
+                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+            inject_touch_at(im, action, 1953, 826, (uint64_t)-24);
+            return;
+        }
+    }
+    // ==================== 自定义鼠标拦截结束 ====================
 
     enum sc_mouse_button button = sc_mouse_button_from_sdl(event->button);
     if (button == SC_MOUSE_BUTTON_UNKNOWN) {
