@@ -30,19 +30,19 @@ struct sc_custom_mapping {
 };
 
 static struct sc_custom_mapping custom_mappings[CUSTOM_MAPPING_COUNT] = {
-    { SDLK_w,      306,  651, (uint64_t)-10, false },
-    { SDLK_d,      398,  743, (uint64_t)-11, false },
-    { SDLK_a,      207,  748, (uint64_t)-12, false },
-    { SDLK_s,      292,  829, (uint64_t)-13, false },
-    { SDLK_q,     1439,  700, (uint64_t)-14, false },
-    { SDLK_e,     1414,  864, (uint64_t)-15, false },
-    { SDLK_r,     1320,  783, (uint64_t)-16, false },
+    { SDLK_W,      306,  651, (uint64_t)-10, false },
+    { SDLK_D,      398,  743, (uint64_t)-11, false },
+    { SDLK_A,      207,  748, (uint64_t)-12, false },
+    { SDLK_S,      292,  829, (uint64_t)-13, false },
+    { SDLK_Q,     1439,  700, (uint64_t)-14, false },
+    { SDLK_E,     1414,  864, (uint64_t)-15, false },
+    { SDLK_R,     1320,  783, (uint64_t)-16, false },
     { SDLK_LSHIFT,1679,  858, (uint64_t)-17, false },
     { SDLK_RSHIFT,1679,  858, (uint64_t)-18, false },
     { SDLK_SPACE, 1693,  708, (uint64_t)-19, false },
     { SDLK_1,     1724,  324, (uint64_t)-20, false },
     { SDLK_2,     1718,  436, (uint64_t)-21, false },
-    { SDLK_t,     1564,  638, (uint64_t)-22, false },
+    { SDLK_T,     1564,  638, (uint64_t)-22, false },
 };
 // 注意：Escape 单独处理，见下
 
@@ -490,10 +490,11 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     SDL_Keycode sdl_keycode = event->key;
     uint16_t mod = sc_sdl_mod_normalize(event->mod);
     bool down = event->type == SDL_EVENT_KEY_DOWN;
-      // ==================== 拦截自定义按键映射 ====================
-    // 控制器不可用、暂停、断开时不处理
+    bool ctrl = mod & SDL_KMOD_CTRL;
+    bool shift = mod & SDL_KMOD_SHIFT;
+    bool repeat = event->repeat;
+    // ==================== 拦截自定义按键映射 ====================
     if (im->controller && !im->screen->paused && !im->disconnected && !im->camera) {
-        // Escape 单独处理（也可加到映射表里，这里保留用户原有行为）
         if (sdl_keycode == SDLK_ESCAPE) {
             enum android_motionevent_action action = down
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
@@ -503,11 +504,9 @@ sc_input_manager_process_key(struct sc_input_manager *im,
 
         struct sc_custom_mapping *m = find_mapping(sdl_keycode);
         if (m) {
-            // 忽略键盘自动重复，只处理首次按下和释放
             if (down && repeat) {
                 return;
             }
-            // 避免重复 DOWN / 重复 UP
             if (down && m->down) return;
             if (!down && !m->down) return;
 
@@ -515,12 +514,9 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
             inject_touch_at(im, action, m->x, m->y, m->pointer_id);
             m->down = down;
-            return;  // 不再把按键转发给手机
+            return;
         }
     }
-    bool ctrl = mod & SDL_KMOD_CTRL;
-    bool shift = mod & SDL_KMOD_SHIFT;
-    bool repeat = event->repeat;
 
     // Either the modifier includes a shortcut modifier, or the key
     // press/release is a modifier key.
