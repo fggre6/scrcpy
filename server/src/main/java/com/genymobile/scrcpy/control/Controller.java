@@ -44,21 +44,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
-    /*
-     * For event injection, there are two display ids:
-     *  - the displayId passed to the constructor (which comes from --display-id passed by the client, 0 for the main display);
-     *  - the virtualDisplayId used for mirroring, notified by the capture instance via the VirtualDisplayListener interface.
-     *
-     * (In case the ScreenCapture uses the "SurfaceControl API", then both ids are equals, but this is an implementation detail.)
-     *
-     * In order to make events work correctly in all cases:
-     *  - virtualDisplayId must be used for events relative to the display (mouse and touch events with coordinates);
-     *  - displayId must be used for other events (like key events).
-     *
-     * If a new separate virtual display is created (using --new-display), then displayId == Device.DISPLAY_ID_NONE. In that case, all events are
-     * sent to the virtual display id.
-     */
-
     private static final class DisplayData {
         private final int virtualDisplayId;
         private final PositionMapper positionMapper;
@@ -512,6 +497,13 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
         long now = SystemClock.uptimeMillis();
 
+        Ln.i("injectTouch ENTER: pointerId=" + pointerId
+                + " action=" + action
+                + " buttons=" + buttons
+                + " actionButton=" + actionButton
+                + " pos=" + position.getPoint().getX() + "," + position.getPoint().getY()
+                + " pointersBefore=" + pointersState.getPointerCount());
+
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
         if (pair == null) {
             return false;
@@ -547,8 +539,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         int pointerCount;
         if (pointerId == POINTER_ID_MOUSE) {
-            // 物理鼠标事件：只发鼠标自身，避免和自定义触摸指针混合
-            pointerProperties[0].id = 0;
+            // 物理鼠标事件：只发送鼠标自身，pointer id 用 1 避免和自定义触摸指针（id=0）冲突
+            pointerProperties[0].id = 1;
             pointerProperties[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
             pointerCoords[0].x = point.getX();
             pointerCoords[0].y = point.getY();
@@ -558,6 +550,12 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         } else {
             pointerCount = pointersState.update(pointerProperties, pointerCoords);
         }
+
+        Ln.i("injectTouch AFTER: pointerId=" + pointerId
+                + " pointerCount=" + pointerCount
+                + " source=" + source
+                + " point=" + point.getX() + "," + point.getY());
+
         if (pointerCount == 1) {
             if (action == MotionEvent.ACTION_DOWN) {
                 lastTouchDown = now;
@@ -585,6 +583,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     // First button pressed: ACTION_DOWN
                     MotionEvent downEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_DOWN, pointerCount, pointerProperties,
                             pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
+                    Ln.i("injectTouch SEND(down): action=" + downEvent.getAction()
+                            + " source=" + downEvent.getSource()
+                            + " pcount=" + downEvent.getPointerCount()
+                            + " id0=" + downEvent.getPointerId(0));
                     if (!Device.injectEvent(downEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
                         return false;
                     }
@@ -596,6 +598,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 if (!InputManager.setActionButton(pressEvent, actionButton)) {
                     return false;
                 }
+                Ln.i("injectTouch SEND(press): action=" + pressEvent.getAction()
+                        + " source=" + pressEvent.getSource()
+                        + " pcount=" + pressEvent.getPointerCount()
+                        + " id0=" + pressEvent.getPointerId(0));
                 if (!Device.injectEvent(pressEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
                     return false;
                 }
@@ -610,6 +616,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 if (!InputManager.setActionButton(releaseEvent, actionButton)) {
                     return false;
                 }
+                Ln.i("injectTouch SEND(release): action=" + releaseEvent.getAction()
+                        + " source=" + releaseEvent.getSource()
+                        + " pcount=" + releaseEvent.getPointerCount()
+                        + " id0=" + releaseEvent.getPointerId(0));
                 if (!Device.injectEvent(releaseEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
                     return false;
                 }
@@ -618,6 +628,10 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                     // Last button released: ACTION_UP
                     MotionEvent upEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_UP, pointerCount, pointerProperties,
                             pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
+                    Ln.i("injectTouch SEND(up): action=" + upEvent.getAction()
+                            + " source=" + upEvent.getSource()
+                            + " pcount=" + upEvent.getPointerCount()
+                            + " id0=" + upEvent.getPointerId(0));
                     if (!Device.injectEvent(upEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
                         return false;
                     }
@@ -629,6 +643,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         MotionEvent event = MotionEvent.obtain(lastTouchDown, now, action, pointerCount, pointerProperties, pointerCoords, 0, buttons, 1f, 1f,
                 DEFAULT_DEVICE_ID, 0, source, 0);
+        Ln.i("injectTouch SEND: action=" + event.getAction()
+                + " source=" + event.getSource()
+                + " pcount=" + event.getPointerCount()
+                + " id0=" + event.getPointerId(0)
+                + (event.getPointerCount() > 1 ? " id1=" + event.getPointerId(1) : ""));
         return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
     }
 
