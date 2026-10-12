@@ -545,7 +545,19 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             pointer.setUp(action == MotionEvent.ACTION_UP);
         }
 
-        int pointerCount = pointersState.update(pointerProperties, pointerCoords);
+        int pointerCount;
+        if (pointerId == POINTER_ID_MOUSE) {
+            // 物理鼠标事件：只发鼠标自身，避免和自定义触摸指针混合
+            pointerProperties[0].id = 0;
+            pointerProperties[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
+            pointerCoords[0].x = point.getX();
+            pointerCoords[0].y = point.getY();
+            pointerCoords[0].pressure = pressure;
+            pointerCoords[0].size = 0;
+            pointerCount = 1;
+        } else {
+            pointerCount = pointersState.update(pointerProperties, pointerCoords);
+        }
         if (pointerCount == 1) {
             if (action == MotionEvent.ACTION_DOWN) {
                 lastTouchDown = now;
