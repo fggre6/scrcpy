@@ -92,6 +92,8 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private final MotionEvent.PointerProperties[] pointerProperties = new MotionEvent.PointerProperties[PointersState.MAX_POINTERS];
     private final MotionEvent.PointerCoords[] pointerCoords = new MotionEvent.PointerCoords[PointersState.MAX_POINTERS];
 
+    private final java.util.Map<Long, Long> independentDownTimes = new java.util.concurrent.ConcurrentHashMap<>();
+    
     private boolean keepDisplayPowerOff;
 
     // Used for resetting video encoding on RESET_VIDEO message or for sending camera controls
@@ -569,7 +571,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
     }
 
-        private boolean injectIndependentTouch(long pointerId, int action, Point point, int targetDisplayId,
+    private boolean injectIndependentTouch(long pointerId, int action, Point point, int targetDisplayId,
                                            float pressure, int actionButton, int buttons, long now) {
         MotionEvent.PointerProperties props = new MotionEvent.PointerProperties();
         MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
@@ -579,27 +581,20 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         int toolType;
 
         if (pointerId == POINTER_ID_MOUSE) {
-            // 物理鼠标：Android 强制要求 SOURCE_MOUSE 的 pointer id 必须为 0
+            // 物理鼠标：Android 强制要求 SOURCE_MOUSE 的 id 必须为 0
             id = 0;
             toolType = MotionEvent.TOOL_TYPE_MOUSE;
             source = InputDevice.SOURCE_MOUSE;
-        } else if (pointerId == -2) {
-            // 通用手指
-            id = 1;
-            toolType = MotionEvent.TOOL_TYPE_FINGER;
-            source = InputDevice.SOURCE_TOUCHSCREEN;
-            buttons = 0;
-        } else if (pointerId == -3) {
-            // 虚拟手指
-            id = 2;
-            toolType = MotionEvent.TOOL_TYPE_FINGER;
-            source = InputDevice.SOURCE_TOUCHSCREEN;
-            buttons = 0;
         } else {
-            // 自定义触摸：-10 → 10, -11 → 11, ...
-            int derived = (int) Math.abs(pointerId);
-            if (derived < 3) derived = 3;       // 避开 0/1/2
-            if (derived > 31) derived = 31;     // 上限保护
+            // 自定义触摸：-2 → 1，-3 → 2，-10 → 10，-11 → 11 ...
+            int derived;
+            if (pointerId == -2) derived = 1;
+            else if (pointerId == -3) derived = 2;
+            else {
+                derived = (int) Math.abs(pointerId);
+                if (derived < 3) derived = 3;
+                if (derived > 31) derived = 31;
+            }
             id = derived;
             toolType = MotionEvent.TOOL_TYPE_FINGER;
             source = InputDevice.SOURCE_TOUCHSCREEN;
@@ -613,7 +608,18 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         coords.pressure = pressure;
         coords.size = 0;
 
-        long downTime = now;
+        // ============ 关键：每个 pointerId 维护独立的 downTime ============
+        long downTime;
+        if (action == MotionEvent.ACTION_DOWN) {
+            downTime = now;
+            independentDownTimes.put(pointerId, now);
+        } else {
+            Long storedDownTime = independentDownTimes.get(pointerId);
+            downTime = (storedDownTime != null) ? storedDownTime : now;
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                independentDownTimes.remove(pointerId);
+            }
+        }
 
         MotionEvent event = MotionEvent.obtain(downTime, now, action, 1,
                 new MotionEvent.PointerProperties[]{props},
@@ -624,6 +630,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 + " action=" + action
                 + " id=" + id
                 + " source=" + source
+                + " downTime=" + downTime + " now=" + now
                 + " pos=" + point.getX() + "," + point.getY());
 
         return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
