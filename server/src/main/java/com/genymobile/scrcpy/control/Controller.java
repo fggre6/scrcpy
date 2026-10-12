@@ -494,15 +494,15 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         return Pair.create(point, targetDisplayId);
     }
 
-    private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
+        private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
         long now = SystemClock.uptimeMillis();
 
-                Ln.i("injectTouch ENTER: pointerId=" + pointerId
+        Ln.i("injectTouch ENTER: pointerId=" + pointerId
                 + " action=" + action
                 + " buttons=" + buttons
                 + " actionButton=" + actionButton
                 + " pos=" + position.getPoint().getX() + "," + position.getPoint().getY());
-                     
+
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
         if (pair == null) {
             return false;
@@ -511,6 +511,14 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         Point point = pair.first;
         int targetDisplayId = pair.second;
 
+        // 鼠标（-1）、通用手指（-2）、虚拟手指（-3）、自定义触摸（<=-10）
+        // 全部独立发送，不经过 pointersState，避免多指合并
+        if (pointerId < 0) {
+            return injectIndependentTouch(pointerId, action, point, targetDisplayId,
+                    pressure, actionButton, buttons, now);
+        }
+
+        // 以下路径用于处理来自设备本身的真实触摸（多指手势）
         int pointerIndex = pointersState.getPointerIndex(pointerId);
         if (pointerIndex == -1) {
             Ln.w("Too many pointers for touch event");
@@ -522,33 +530,18 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
 
         int source;
         boolean activeSecondaryButtons = ((actionButton | buttons) & ~MotionEvent.BUTTON_PRIMARY) != 0;
-        if (pointerId == POINTER_ID_MOUSE && (action == MotionEvent.ACTION_HOVER_MOVE || activeSecondaryButtons)) {
-            // real mouse event, or event incompatible with a finger
+        if (action == MotionEvent.ACTION_HOVER_MOVE || activeSecondaryButtons) {
             pointerProperties[pointerIndex].toolType = MotionEvent.TOOL_TYPE_MOUSE;
             source = InputDevice.SOURCE_MOUSE;
             pointer.setUp(buttons == 0);
         } else {
-            // POINTER_ID_GENERIC_FINGER, POINTER_ID_VIRTUAL_FINGER or real touch from device
             pointerProperties[pointerIndex].toolType = MotionEvent.TOOL_TYPE_FINGER;
             source = InputDevice.SOURCE_TOUCHSCREEN;
-            // Buttons must not be set for touch events
             buttons = 0;
             pointer.setUp(action == MotionEvent.ACTION_UP);
         }
 
-        int pointerCount;
-        if (pointerId == POINTER_ID_MOUSE) {
-            // 物理鼠标事件：只发送鼠标自身，pointer id 用 1 避免和自定义触摸指针（id=0）冲突
-            pointerProperties[0].id = 1;
-            pointerProperties[0].toolType = MotionEvent.TOOL_TYPE_MOUSE;
-            pointerCoords[0].x = point.getX();
-            pointerCoords[0].y = point.getY();
-            pointerCoords[0].pressure = pressure;
-            pointerCoords[0].size = 0;
-            pointerCount = 1;
-        } else {
-            pointerCount = pointersState.update(pointerProperties, pointerCoords);
-        }
+        int pointerCount = pointersState.update(pointerProperties, pointerCoords);
 
         Ln.i("injectTouch AFTER: pointerId=" + pointerId
                 + " pointerCount=" + pointerCount
@@ -560,7 +553,6 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 lastTouchDown = now;
             }
         } else {
-            // secondary pointers must use ACTION_POINTER_* ORed with the pointerIndex
             if (action == MotionEvent.ACTION_UP) {
                 action = MotionEvent.ACTION_POINTER_UP | (pointerIndex << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
             } else if (action == MotionEvent.ACTION_DOWN) {
@@ -568,77 +560,67 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
             }
         }
 
-        /* If the input device is a mouse (on API >= 23):
-         *   - the first button pressed must first generate ACTION_DOWN;
-         *   - all button pressed (including the first one) must generate ACTION_BUTTON_PRESS;
-         *   - all button released (including the last one) must generate ACTION_BUTTON_RELEASE;
-         *   - the last button released must in addition generate ACTION_UP.
-         *
-         * Otherwise, Chrome does not work properly: <https://github.com/Genymobile/scrcpy/issues/3635>
-         */
-        if (Build.VERSION.SDK_INT >= AndroidVersions.API_23_ANDROID_6_0 && source == InputDevice.SOURCE_MOUSE) {
-            if (action == MotionEvent.ACTION_DOWN) {
-                if (actionButton == buttons) {
-                    // First button pressed: ACTION_DOWN
-                    MotionEvent downEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_DOWN, pointerCount, pointerProperties,
-                            pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
-                    Ln.i("injectTouch SEND(down): action=" + downEvent.getAction()
-                            + " source=" + downEvent.getSource()
-                            + " pcount=" + downEvent.getPointerCount()
-                            + " id0=" + downEvent.getPointerId(0));
-                    if (!Device.injectEvent(downEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
-                        return false;
-                    }
-                }
+        MotionEvent event = MotionEvent.obtain(lastTouchDown, now, action, pointerCount, pointerProperties, pointerCoords,
+                0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
+        Ln.i("injectTouch SEND: action=" + event.getAction()
+                + " source=" + event.getSource()
+                + " pcount=" + event.getPointerCount()
+                + " id0=" + event.getPointerId(0));
+        return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
+    }
 
-                // Any button pressed: ACTION_BUTTON_PRESS
-                MotionEvent pressEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_BUTTON_PRESS, pointerCount, pointerProperties,
-                        pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
-                if (!InputManager.setActionButton(pressEvent, actionButton)) {
-                    return false;
-                }
-                Ln.i("injectTouch SEND(press): action=" + pressEvent.getAction()
-                        + " source=" + pressEvent.getSource()
-                        + " pcount=" + pressEvent.getPointerCount()
-                        + " id0=" + pressEvent.getPointerId(0));
-                if (!Device.injectEvent(pressEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
-                    return false;
-                }
+    private boolean injectIndependentTouch(long pointerId, int action, Point point, int targetDisplayId,
+                                           float pressure, int actionButton, int buttons, long now) {
+        MotionEvent.PointerProperties props = new MotionEvent.PointerProperties();
+        MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
 
-                return true;
-            }
+        int id;
+        int source;
+        int toolType;
 
-            if (action == MotionEvent.ACTION_UP) {
-                // Any button released: ACTION_BUTTON_RELEASE
-                MotionEvent releaseEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_BUTTON_RELEASE, pointerCount, pointerProperties,
-                        pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
-                if (!InputManager.setActionButton(releaseEvent, actionButton)) {
-                    return false;
-                }
-                Ln.i("injectTouch SEND(release): action=" + releaseEvent.getAction()
-                        + " source=" + releaseEvent.getSource()
-                        + " pcount=" + releaseEvent.getPointerCount()
-                        + " id0=" + releaseEvent.getPointerId(0));
-                if (!Device.injectEvent(releaseEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
-                    return false;
-                }
-
-                if (buttons == 0) {
-                    // Last button released: ACTION_UP
-                    MotionEvent upEvent = MotionEvent.obtain(lastTouchDown, now, MotionEvent.ACTION_UP, pointerCount, pointerProperties,
-                            pointerCoords, 0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
-                    Ln.i("injectTouch SEND(up): action=" + upEvent.getAction()
-                            + " source=" + upEvent.getSource()
-                            + " pcount=" + upEvent.getPointerCount()
-                            + " id0=" + upEvent.getPointerId(0));
-                    if (!Device.injectEvent(upEvent, targetDisplayId, Device.INJECT_MODE_ASYNC)) {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
+        if (pointerId == POINTER_ID_MOUSE) {
+            // 物理鼠标：用 id=31，绝不可能与触摸 id（0~9）冲突
+            id = 31;
+            toolType = MotionEvent.TOOL_TYPE_MOUSE;
+            source = InputDevice.SOURCE_MOUSE;
+        } else {
+            // 通用手指（-2）、虚拟手指（-3）、自定义触摸（-10、-11...）
+            // 映射为唯一 id：-2 → 20，-3 → 21，-10 → 10，-11 → 11 ...
+            long derived;
+            if (pointerId == -2) derived = 20;
+            else if (pointerId == -3) derived = 21;
+            else derived = -pointerId; // 自定义触摸 -10 → 10
+            if (derived < 0) derived = 0;
+            if (derived > 30) derived = 30;
+            id = (int) derived;
+            toolType = MotionEvent.TOOL_TYPE_FINGER;
+            source = InputDevice.SOURCE_TOUCHSCREEN;
+            buttons = 0;
         }
+
+        props.id = id;
+        props.toolType = toolType;
+        coords.x = point.getX();
+        coords.y = point.getY();
+        coords.pressure = pressure;
+        coords.size = 0;
+
+        // 鼠标的 HOVER_MOVE 之外，downTime 用 now 即可（不依赖 pointersState）
+        long downTime = (action == MotionEvent.ACTION_DOWN) ? now : now;
+
+        MotionEvent event = MotionEvent.obtain(downTime, now, action, 1,
+                new MotionEvent.PointerProperties[]{props},
+                new MotionEvent.PointerCoords[]{coords},
+                0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
+
+        Ln.i("injectIndependentTouch: pointerId=" + pointerId
+                + " action=" + action
+                + " id=" + id
+                + " source=" + source
+                + " pos=" + point.getX() + "," + point.getY());
+
+        return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
+    }
 
         MotionEvent event = MotionEvent.obtain(lastTouchDown, now, action, pointerCount, pointerProperties, pointerCoords, 0, buttons, 1f, 1f,
                 DEFAULT_DEVICE_ID, 0, source, 0);
