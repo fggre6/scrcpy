@@ -569,57 +569,65 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
     }
 
-    private boolean injectIndependentTouch(long pointerId, int action, Point point, int targetDisplayId,
-                                       float pressure, int actionButton, int buttons, long now) {
-    MotionEvent.PointerProperties props = new MotionEvent.PointerProperties();
-    MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
+        private boolean injectIndependentTouch(long pointerId, int action, Point point, int targetDisplayId,
+                                           float pressure, int actionButton, int buttons, long now) {
+        MotionEvent.PointerProperties props = new MotionEvent.PointerProperties();
+        MotionEvent.PointerCoords coords = new MotionEvent.PointerCoords();
 
-    int id;
-    int source;
-    int toolType;
+        int id;
+        int source;
+        int toolType;
 
-    if (pointerId == POINTER_ID_MOUSE) {
-        // 物理鼠标：保留一个固定的、唯一的 id，例如 30
-        id = 30;
-        toolType = MotionEvent.TOOL_TYPE_MOUSE;
-        source = InputDevice.SOURCE_MOUSE;
-    } else {
-        // 自定义触摸：使用 pointerId 的绝对值作为 id
-        // 例如：-10 -> 10, -11 -> 11
-        // 注意：确保这个 id 不与鼠标的 30 冲突，且不超过 31
-        id = (int) Math.abs(pointerId);
-        if (id > 29) { // 避免与鼠标的 30 冲突，并防止超出 31 的上限
-            Ln.w("Pointer id " + id + " is too large, clamping to 29");
-            id = 29;
+        if (pointerId == POINTER_ID_MOUSE) {
+            // 物理鼠标：Android 强制要求 SOURCE_MOUSE 的 pointer id 必须为 0
+            id = 0;
+            toolType = MotionEvent.TOOL_TYPE_MOUSE;
+            source = InputDevice.SOURCE_MOUSE;
+        } else if (pointerId == -2) {
+            // 通用手指
+            id = 1;
+            toolType = MotionEvent.TOOL_TYPE_FINGER;
+            source = InputDevice.SOURCE_TOUCHSCREEN;
+            buttons = 0;
+        } else if (pointerId == -3) {
+            // 虚拟手指
+            id = 2;
+            toolType = MotionEvent.TOOL_TYPE_FINGER;
+            source = InputDevice.SOURCE_TOUCHSCREEN;
+            buttons = 0;
+        } else {
+            // 自定义触摸：-10 → 10, -11 → 11, ...
+            int derived = (int) Math.abs(pointerId);
+            if (derived < 3) derived = 3;       // 避开 0/1/2
+            if (derived > 31) derived = 31;     // 上限保护
+            id = derived;
+            toolType = MotionEvent.TOOL_TYPE_FINGER;
+            source = InputDevice.SOURCE_TOUCHSCREEN;
+            buttons = 0;
         }
-        toolType = MotionEvent.TOOL_TYPE_FINGER;
-        source = InputDevice.SOURCE_TOUCHSCREEN;
-        buttons = 0; // 触摸事件不应携带鼠标按键信息
+
+        props.id = id;
+        props.toolType = toolType;
+        coords.x = point.getX();
+        coords.y = point.getY();
+        coords.pressure = pressure;
+        coords.size = 0;
+
+        long downTime = now;
+
+        MotionEvent event = MotionEvent.obtain(downTime, now, action, 1,
+                new MotionEvent.PointerProperties[]{props},
+                new MotionEvent.PointerCoords[]{coords},
+                0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
+
+        Ln.i("injectIndependentTouch: pointerId=" + pointerId
+                + " action=" + action
+                + " id=" + id
+                + " source=" + source
+                + " pos=" + point.getX() + "," + point.getY());
+
+        return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
     }
-
-    props.id = id;
-    props.toolType = toolType;
-    coords.x = point.getX();
-    coords.y = point.getY();
-    coords.pressure = pressure;
-    coords.size = 0;
-
-    // 使用统一的 downTime，避免因 downTime 不一致导致系统无法识别
-    long downTime = (action == MotionEvent.ACTION_DOWN) ? now : now;
-
-    MotionEvent event = MotionEvent.obtain(downTime, now, action, 1,
-            new MotionEvent.PointerProperties[]{props},
-            new MotionEvent.PointerCoords[]{coords},
-            0, buttons, 1f, 1f, DEFAULT_DEVICE_ID, 0, source, 0);
-
-    Ln.i("injectIndependentTouch: pointerId=" + pointerId
-            + " action=" + action
-            + " id=" + id
-            + " source=" + source
-            + " pos=" + point.getX() + "," + point.getY());
-
-    return Device.injectEvent(event, targetDisplayId, Device.INJECT_MODE_ASYNC);
-}
 
     private boolean injectScroll(Position position, float hScroll, float vScroll, int buttons) {
         long now = SystemClock.uptimeMillis();
