@@ -12,11 +12,10 @@ permissions:
   contents: write
 
 env:
-  SCRCPY_VERSION: '5.0.1'  # 与你的源码版本保持一致
-  PREBUILT_SERVER_URL: 'https://github.com/Genymobile/scrcpy/releases/download/v3.2/scrcpy-server-v3.2'  # 如需预编译服务端则保留
+  SCRCPY_VERSION: '5.0.1'
 
 jobs:
-  # ==================== 编译服务端（如果修改了 Java 代码） ====================
+  # ==================== 编译服务端 ====================
   build-server:
     runs-on: ubuntu-latest
     steps:
@@ -30,9 +29,10 @@ jobs:
 
       - name: 编译服务端
         run: |
-          cd server
-          ./gradlew assembleRelease
-          ls -lh build/outputs/apk/release/
+          # 注意：gradlew 在项目根目录
+          chmod +x ./gradlew
+          ./gradlew -p server assembleRelease
+          ls -lh server/build/outputs/apk/release/
 
       - name: 上传服务端产物
         uses: actions/upload-artifact@v4
@@ -42,7 +42,7 @@ jobs:
 
   # ==================== 编译 Windows 客户端 ====================
   build-windows:
-    needs: build-server  # 确保服务端先编译
+    needs: build-server
     runs-on: windows-latest
     defaults:
       run:
