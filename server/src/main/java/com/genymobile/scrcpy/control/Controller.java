@@ -502,8 +502,7 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
                 + " buttons=" + buttons
                 + " actionButton=" + actionButton
                 + " pos=" + position.getPoint().getX() + "," + position.getPoint().getY()
-                + " pointersBefore=" + pointersState.size());
-
+                     
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
         if (pair == null) {
             return false;
