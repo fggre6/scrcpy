@@ -65,13 +65,42 @@ static bool
 inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
                 int32_t x, int32_t y, uint64_t pointer_id) {
     bool up = action == AMOTION_EVENT_ACTION_UP;
+    struct sc_size fs = im->screen->frame_size;
+
+    int32_t tx = x;
+    int32_t ty = y;
+
+    // 如果坐标超出 frame_size，说明用户填的是横屏坐标，需要旋转
+    if (tx >= fs.width || ty >= fs.height) {
+        // 顺时针 90 度：(x, y) -> (y, H_src - 1 - x)，H_src 取 fs 中较大的值
+        int32_t src_w = (fs.width > fs.height) ? fs.width : fs.height;
+        int32_t rx = y;
+        int32_t ry = src_w - 1 - x;
+        if (rx >= 0 && rx < fs.width && ry >= 0 && ry < fs.height) {
+            tx = rx;
+            ty = ry;
+            LOGI("rotate cw: (%d,%d) -> (%d,%d)", x, y, tx, ty);
+        } else {
+            // 逆时针 90 度：(x, y) -> (W_dst - 1 - y, x)
+            rx = fs.width - 1 - y;
+            ry = x;
+            if (rx >= 0 && rx < fs.width && ry >= 0 && ry < fs.height) {
+                tx = rx;
+                ty = ry;
+                LOGI("rotate ccw: (%d,%d) -> (%d,%d)", x, y, tx, ty);
+            } else {
+                LOGW("Cannot fit (%d,%d) into fs=%dx%d", x, y, fs.width, fs.height);
+                return false;
+            }
+        }
+    }
 
     struct sc_control_msg msg;
     msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
     msg.inject_touch_event.action = action;
-    msg.inject_touch_event.position.screen_size = im->screen->frame_size;
-    msg.inject_touch_event.position.point.x = x;
-    msg.inject_touch_event.position.point.y = y;
+    msg.inject_touch_event.position.screen_size = fs;
+    msg.inject_touch_event.position.point.x = tx;
+    msg.inject_touch_event.position.point.y = ty;
     msg.inject_touch_event.pointer_id = pointer_id;
     msg.inject_touch_event.pressure = up ? 0.0f : 1.0f;
     msg.inject_touch_event.action_button = 0;
