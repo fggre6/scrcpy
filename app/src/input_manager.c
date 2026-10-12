@@ -25,6 +25,23 @@ struct sc_custom_mapping {
     uint64_t pointer_id;
     bool down;
 };
+#define MAX_COMBO_KEYS 4
+
+struct sc_custom_combo {
+    SDL_Keycode keys[MAX_COMBO_KEYS];
+    int nkeys;
+    int32_t x;
+    int32_t y;
+    uint64_t pointer_id;
+    bool active;
+};
+
+static struct sc_custom_combo *g_custom_combos = NULL;
+static int g_custom_combo_count = 0;
+static int g_custom_combo_capacity = 0;
+
+// 当前按下的所有映射键
+static bool g_pressed[256];  // 索引为 SDL keycode & 0xFF，简化处理
 
 static struct sc_custom_mapping *g_custom_mappings = NULL;
 static int g_custom_mapping_count = 0;
@@ -102,6 +119,93 @@ add_custom_mapping(SDL_Keycode kc, int32_t x, int32_t y) {
     g_custom_mappings[g_custom_mapping_count].down = false;
     g_custom_mapping_count++;
 }
+static void
+add_custom_combo(SDL_Keycode *keys, int nkeys, int32_t x, int32_t y) {
+    if (g_custom_combo_count >= g_custom_combo_capacity) {
+        int new_cap = g_custom_combo_capacity ? g_custom_combo_capacity * 2 : 8;
+        struct sc_custom_combo *new_arr = realloc(g_custom_combos, new_cap * sizeof(*new_arr));
+        if (!new_arr) return;
+        g_custom_combos = new_arr;
+        g_custom_combo_capacity = new_cap;
+    }
+    struct sc_custom_combo *c = &g_custom_combos[g_custom_combo_count];
+    memcpy(c->keys, keys, nkeys * sizeof(SDL_Keycode));
+    c->nkeys = nkeys;
+    c->x = x;
+    c->y = y;
+    c->pointer_id = (uint64_t)-(100 + g_custom_combo_count);
+    c->active = false;
+    g_custom_combo_count++;
+}
+
+// 判断某个键是否被任何 combo 覆盖
+static bool
+key_in_combo(SDL_Keycode kc) {
+    for (int i = 0; i < g_custom_combo_count; ++i) {
+        for (int j = 0; j < g_custom_combos[i].nkeys; ++j) {
+            if (g_custom_combos[i].keys[j] == kc) return true;
+        }
+    }
+    return false;
+}
+// 前向声明
+static struct sc_custom_mapping *
+find_mapping(SDL_Keycode keycode);
+
+static bool
+inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
+                int32_t x, int32_t y, uint64_t pointer_id);
+// 检查所有 combo，匹配成功的激活，不再匹配的释放
+static void
+update_combos(struct sc_input_manager *im) {
+    for (int i = 0; i < g_custom_combo_count; ++i) {
+        struct sc_custom_combo *c = &g_custom_combos[i];
+        bool match = true;
+        for (int j = 0; j < c->nkeys; ++j) {
+            if (!g_pressed[c->keys[j] & 0xFF]) {
+                match = false;
+                break;
+            }
+        }
+
+        if (match && !c->active) {
+            // 组合键激活：
+            // 先撤销组合键里所有键的单键 DOWN，避免同时按下两个位置
+            for (int j = 0; j < c->nkeys; ++j) {
+                struct sc_custom_mapping *m = find_mapping(c->keys[j]);
+                if (m && m->down) {
+                    inject_touch_at(im, AMOTION_EVENT_ACTION_UP,
+                                    m->x, m->y, m->pointer_id);
+                    m->down = false;
+                }
+            }
+            // 再发送组合键 DOWN
+            c->active = true;
+            inject_touch_at(im, AMOTION_EVENT_ACTION_DOWN,
+                            c->x, c->y, c->pointer_id);
+            LOGI("Combo down: %d keys -> (%d, %d)", c->nkeys, c->x, c->y);
+
+        } else if (!match && c->active) {
+            // 组合键停用：
+            // 先发送组合键 UP
+            c->active = false;
+            inject_touch_at(im, AMOTION_EVENT_ACTION_UP,
+                            c->x, c->y, c->pointer_id);
+            LOGI("Combo up: %d keys", c->nkeys);
+
+            // 对于组合键里仍然按着的键，重新发送单键 DOWN
+            for (int j = 0; j < c->nkeys; ++j) {
+                if (!g_pressed[c->keys[j] & 0xFF]) continue;
+                struct sc_custom_mapping *m = find_mapping(c->keys[j]);
+                if (m && !m->down) {
+                    inject_touch_at(im, AMOTION_EVENT_ACTION_DOWN,
+                                    m->x, m->y, m->pointer_id);
+                    m->down = true;
+                }
+            }
+        }
+    }
+}
 
 static void
 load_mappings(void) {
@@ -168,6 +272,41 @@ load_mappings(void) {
             continue;
         }
 
+        // ==================== 组合键识别 ====================
+        if (strchr(keyname, '+')) {
+            SDL_Keycode keys[MAX_COMBO_KEYS];
+            int nkeys = 0;
+            char tmp[128];
+            strncpy(tmp, keyname, sizeof(tmp) - 1);
+            tmp[sizeof(tmp) - 1] = '\0';
+
+            char *save = NULL;
+            char *tok = strtok_r(tmp, "+", &save);
+            while (tok && nkeys < MAX_COMBO_KEYS) {
+                while (*tok == ' ' || *tok == '\t') tok++;
+                char *e = tok + strlen(tok);
+                while (e > tok && isspace((unsigned char)*(e - 1))) e--;
+                *e = '\0';
+
+                SDL_Keycode kc = parse_key_name(tok);
+                if (kc == SDLK_UNKNOWN) {
+                    LOGW("Unknown combo key: %s", tok);
+                    nkeys = 0;
+                    break;
+                }
+                keys[nkeys++] = kc;
+                tok = strtok_r(NULL, "+", &save);
+            }
+            if (nkeys >= 2) {
+                add_custom_combo(keys, nkeys, x, y);
+                LOGI("Loaded combo: %s -> (%d, %d)", keyname, x, y);
+            } else {
+                LOGW("Invalid combo: %s", keyname);
+            }
+            continue;
+        }
+        // ==================== 组合键识别结束 ====================
+
         SDL_Keycode kc = parse_key_name(keyname);
         if (kc != SDLK_UNKNOWN) {
             add_custom_mapping(kc, x, y);
@@ -176,7 +315,8 @@ load_mappings(void) {
         }
     }
     fclose(f);
-    LOGI("Loaded %d custom mappings", g_custom_mapping_count);
+    LOGI("Loaded %d custom mappings, %d combos",
+         g_custom_mapping_count, g_custom_combo_count);
 }
 
 static struct sc_custom_mapping *
@@ -608,16 +748,54 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             }
         }
 
-        // 其他映射键
-        struct sc_custom_mapping *m = find_mapping(sdl_keycode);
-        if (m) {
-            if (down && repeat) return;
-            if (down && m->down) return;
-            if (!down && !m->down) return;
-            enum android_motionevent_action action = down
-                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            inject_touch_at(im, action, m->x, m->y, m->pointer_id);
-            m->down = down;
+                // 记录按键状态
+        bool is_mapping_key = find_mapping(sdl_keycode) != NULL;
+        bool is_combo_key = key_in_combo(sdl_keycode);
+        if (is_mapping_key || is_combo_key) {
+            if (down && repeat) return;  // 忽略键盘自动重复
+
+            // 更新全局按下状态
+            if (down) {
+                g_pressed[sdl_keycode & 0xFF] = true;
+            } else {
+                g_pressed[sdl_keycode & 0xFF] = false;
+            }
+
+            // 优先检查 combo：先更新 combo 状态
+            if (g_custom_combo_count > 0) {
+                update_combos(im);
+            }
+
+            // 单键处理：如果该键没有被任何 combo 覆盖，或没有活跃 combo 覆盖它
+            struct sc_custom_mapping *m = find_mapping(sdl_keycode);
+            if (m) {
+                // 如果该键属于某个已激活的 combo，则跳过单键逻辑
+                bool covered_by_active_combo = false;
+                for (int i = 0; i < g_custom_combo_count; ++i) {
+                    struct sc_custom_combo *c = &g_custom_combos[i];
+                    if (!c->active) continue;
+                    for (int j = 0; j < c->nkeys; ++j) {
+                        if (c->keys[j] == sdl_keycode) {
+                            covered_by_active_combo = true;
+                            break;
+                        }
+                    }
+                    if (covered_by_active_combo) break;
+                }
+
+                if (!covered_by_active_combo) {
+                    if (down && m->down) return;
+                    if (!down && !m->down) return;
+                    enum android_motionevent_action action = down
+                        ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+                    inject_touch_at(im, action, m->x, m->y, m->pointer_id);
+                    m->down = down;
+                } else if (!down && m->down) {
+                    // 从 combo 覆盖切换到不覆盖时，需要补发单键的 UP
+                    m->down = false;
+                    inject_touch_at(im, AMOTION_EVENT_ACTION_UP, m->x, m->y, m->pointer_id);
+                }
+            }
             return;
         }
     }
