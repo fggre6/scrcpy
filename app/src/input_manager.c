@@ -25,6 +25,7 @@ struct sc_custom_mapping {
     uint64_t pointer_id;
     bool down;
 };
+
 #define MAX_COMBO_KEYS 4
 
 struct sc_custom_combo {
@@ -36,16 +37,32 @@ struct sc_custom_combo {
     bool active;
 };
 
-static struct sc_custom_combo *g_custom_combos = NULL;
-static int g_custom_combo_count = 0;
-static int g_custom_combo_capacity = 0;
-
-// 当前按下的所有映射键
-static bool g_pressed[256];  // 索引为 SDL keycode & 0xFF，简化处理
+struct sc_custom_slide {
+    SDL_Keycode keycode;
+    int32_t x1;
+    int32_t y1;
+    int32_t dx;
+    int32_t dy;
+    int duration_ms;
+    uint64_t pointer_id;
+    volatile bool running;
+    volatile bool stop_requested;
+};
 
 static struct sc_custom_mapping *g_custom_mappings = NULL;
 static int g_custom_mapping_count = 0;
 static int g_custom_mapping_capacity = 0;
+
+static struct sc_custom_combo *g_custom_combos = NULL;
+static int g_custom_combo_count = 0;
+static int g_custom_combo_capacity = 0;
+
+static struct sc_custom_slide *g_custom_slides = NULL;
+static int g_custom_slide_count = 0;
+static int g_custom_slide_capacity = 0;
+
+// 当前按下的所有映射键
+static bool g_pressed[256];
 
 // 特殊鼠标坐标
 static int32_t g_right_click_x = 1953;
@@ -119,6 +136,7 @@ add_custom_mapping(SDL_Keycode kc, int32_t x, int32_t y) {
     g_custom_mappings[g_custom_mapping_count].down = false;
     g_custom_mapping_count++;
 }
+
 static void
 add_custom_combo(SDL_Keycode *keys, int nkeys, int32_t x, int32_t y) {
     if (g_custom_combo_count >= g_custom_combo_capacity) {
@@ -138,6 +156,144 @@ add_custom_combo(SDL_Keycode *keys, int nkeys, int32_t x, int32_t y) {
     g_custom_combo_count++;
 }
 
+static void
+add_custom_slide(SDL_Keycode kc, int32_t x1, int32_t y1,
+                 int32_t dx, int32_t dy, int duration_ms) {
+    if (g_custom_slide_count >= g_custom_slide_capacity) {
+        int new_cap = g_custom_slide_capacity ? g_custom_slide_capacity * 2 : 8;
+        struct sc_custom_slide *new_arr = realloc(g_custom_slides,
+                                                   new_cap * sizeof(*new_arr));
+        if (!new_arr) return;
+        g_custom_slides = new_arr;
+        g_custom_slide_capacity = new_cap;
+    }
+    struct sc_custom_slide *s = &g_custom_slides[g_custom_slide_count];
+    s->keycode = kc;
+    s->x1 = x1;
+    s->y1 = y1;
+    s->dx = dx;
+    s->dy = dy;
+    s->duration_ms = duration_ms;
+    s->pointer_id = (uint64_t)-(200 + g_custom_slide_count);
+    s->running = false;
+    s->stop_requested = false;
+    g_custom_slide_count++;
+}
+
+static struct sc_custom_mapping *
+find_mapping(SDL_Keycode keycode) {
+    for (int i = 0; i < g_custom_mapping_count; ++i) {
+        if (g_custom_mappings[i].keycode == keycode) {
+            return &g_custom_mappings[i];
+        }
+    }
+    return NULL;
+}
+
+static struct sc_custom_slide *
+find_slide(SDL_Keycode keycode) {
+    for (int i = 0; i < g_custom_slide_count; ++i) {
+        if (g_custom_slides[i].keycode == keycode) {
+            return &g_custom_slides[i];
+        }
+    }
+    return NULL;
+}
+
+// 直接发送手机坐标的触摸事件
+static bool
+inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
+                int32_t x, int32_t y, uint64_t pointer_id) {
+    bool up = action == AMOTION_EVENT_ACTION_UP;
+
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+    msg.inject_touch_event.action = action;
+    msg.inject_touch_event.position.screen_size = im->screen->frame_size;
+    msg.inject_touch_event.position.point.x = x;
+    msg.inject_touch_event.position.point.y = y;
+    msg.inject_touch_event.pointer_id = pointer_id;
+    msg.inject_touch_event.pressure = up ? 0.0f : 1.0f;
+    msg.inject_touch_event.action_button = 0;
+    msg.inject_touch_event.buttons = 0;
+
+    if (!sc_controller_push_msg(im->controller, &msg)) {
+        LOGW("Could not request 'inject custom touch event'");
+        return false;
+    }
+    return true;
+}
+
+// ==================== 滑动线程 ====================
+
+struct slide_ctx {
+    struct sc_custom_slide *slide;
+    struct sc_controller *controller;
+    struct sc_size frame_size;
+};
+
+static bool
+push_touch_msg(struct sc_controller *controller, struct sc_size frame_size,
+               enum android_motionevent_action action,
+               int32_t x, int32_t y, uint64_t pointer_id) {
+    bool up = action == AMOTION_EVENT_ACTION_UP;
+    struct sc_control_msg msg;
+    msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
+    msg.inject_touch_event.action = action;
+    msg.inject_touch_event.position.screen_size = frame_size;
+    msg.inject_touch_event.position.point.x = x;
+    msg.inject_touch_event.position.point.y = y;
+    msg.inject_touch_event.pointer_id = pointer_id;
+    msg.inject_touch_event.pressure = up ? 0.0f : 1.0f;
+    msg.inject_touch_event.action_button = 0;
+    msg.inject_touch_event.buttons = 0;
+    return sc_controller_push_msg(controller, &msg);
+}
+
+static int SDLCALL
+slide_thread(void *data) {
+    struct slide_ctx *ctx = data;
+    struct sc_custom_slide *s = ctx->slide;
+    const int steps = 20;
+    int step_delay = s->duration_ms / steps;
+    if (step_delay < 1) step_delay = 1;
+
+    // 在起点按下
+    push_touch_msg(ctx->controller, ctx->frame_size,
+                   AMOTION_EVENT_ACTION_DOWN,
+                   s->x1, s->y1, s->pointer_id);
+
+    while (!s->stop_requested) {
+        // 从起点滑到起点 + (dx, dy)
+        for (int i = 1; i <= steps && !s->stop_requested; ++i) {
+            int32_t x = s->x1 + (int32_t)((int64_t)s->dx * i / steps);
+            int32_t y = s->y1 + (int32_t)((int64_t)s->dy * i / steps);
+            push_touch_msg(ctx->controller, ctx->frame_size,
+                           AMOTION_EVENT_ACTION_MOVE,
+                           x, y, s->pointer_id);
+            SDL_Delay(step_delay);
+        }
+
+        if (s->stop_requested) break;
+
+        // 用 MOVE 事件瞬间重置回起点（保持按住）
+        push_touch_msg(ctx->controller, ctx->frame_size,
+                       AMOTION_EVENT_ACTION_MOVE,
+                       s->x1, s->y1, s->pointer_id);
+    }
+
+    // 松手时在起点抬起
+    push_touch_msg(ctx->controller, ctx->frame_size,
+                   AMOTION_EVENT_ACTION_UP,
+                   s->x1, s->y1, s->pointer_id);
+
+    s->running = false;
+    free(ctx);
+    return 0;
+}
+
+// ==================== 组合键辅助 ====================
+
 // 判断某个键是否被任何 combo 覆盖
 static bool
 key_in_combo(SDL_Keycode kc) {
@@ -148,13 +304,7 @@ key_in_combo(SDL_Keycode kc) {
     }
     return false;
 }
-// 前向声明
-static struct sc_custom_mapping *
-find_mapping(SDL_Keycode keycode);
 
-static bool
-inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
-                int32_t x, int32_t y, uint64_t pointer_id);
 // 检查所有 combo，匹配成功的激活，不再匹配的释放
 static void
 update_combos(struct sc_input_manager *im) {
@@ -169,8 +319,7 @@ update_combos(struct sc_input_manager *im) {
         }
 
         if (match && !c->active) {
-            // 组合键激活：
-            // 先撤销组合键里所有键的单键 DOWN，避免同时按下两个位置
+            // 组合键激活：撤销组合键里所有键的单键 DOWN
             for (int j = 0; j < c->nkeys; ++j) {
                 struct sc_custom_mapping *m = find_mapping(c->keys[j]);
                 if (m && m->down) {
@@ -179,21 +328,20 @@ update_combos(struct sc_input_manager *im) {
                     m->down = false;
                 }
             }
-            // 再发送组合键 DOWN
+            // 发送组合键 DOWN
             c->active = true;
             inject_touch_at(im, AMOTION_EVENT_ACTION_DOWN,
                             c->x, c->y, c->pointer_id);
             LOGI("Combo down: %d keys -> (%d, %d)", c->nkeys, c->x, c->y);
 
         } else if (!match && c->active) {
-            // 组合键停用：
-            // 先发送组合键 UP
+            // 组合键停用：先发组合键 UP
             c->active = false;
             inject_touch_at(im, AMOTION_EVENT_ACTION_UP,
                             c->x, c->y, c->pointer_id);
             LOGI("Combo up: %d keys", c->nkeys);
 
-            // 对于组合键里仍然按着的键，重新发送单键 DOWN
+            // 对于仍然按着的键，重新发单键 DOWN
             for (int j = 0; j < c->nkeys; ++j) {
                 if (!g_pressed[c->keys[j] & 0xFF]) continue;
                 struct sc_custom_mapping *m = find_mapping(c->keys[j]);
@@ -207,9 +355,14 @@ update_combos(struct sc_input_manager *im) {
     }
 }
 
+// ==================== 配置文件加载 ====================
+
 static void
 load_mappings(void) {
     g_custom_mapping_count = 0;
+    g_custom_combo_count = 0;
+    g_custom_slide_count = 0;
+
     const char *filename = "scrcpy_mappings.txt";
     FILE *f = fopen(filename, "r");
     if (!f) {
@@ -253,22 +406,60 @@ load_mappings(void) {
         while (end > keyname && isspace((unsigned char)*(end - 1))) end--;
         *end = '\0';
 
-        int x, y;
-        if (sscanf(colon + 1, "%d , %d", &x, &y) != 2 &&
-            sscanf(colon + 1, "%d %d", &x, &y) != 2) {
-            continue;
-        }
-
+        // 鼠标特殊键
         if (SDL_strcasecmp(keyname, "MOUSE_RIGHT") == 0 ||
             SDL_strcasecmp(keyname, "RIGHT_CLICK") == 0) {
-            g_right_click_x = x;
-            g_right_click_y = y;
+            int x, y;
+            if (sscanf(colon + 1, "%d , %d", &x, &y) == 2 ||
+                sscanf(colon + 1, "%d %d", &x, &y) == 2) {
+                g_right_click_x = x;
+                g_right_click_y = y;
+            }
             continue;
         }
         if (SDL_strcasecmp(keyname, "MOUSE_LEFT_LOCKED") == 0 ||
             SDL_strcasecmp(keyname, "LEFT_CLICK_LOCKED") == 0) {
-            g_left_click_locked_x = x;
-            g_left_click_locked_y = y;
+            int x, y;
+            if (sscanf(colon + 1, "%d , %d", &x, &y) == 2 ||
+                sscanf(colon + 1, "%d %d", &x, &y) == 2) {
+                g_left_click_locked_x = x;
+                g_left_click_locked_y = y;
+            }
+            continue;
+        }
+
+        // ==================== 滑动识别 ====================
+        if (SDL_strncasecmp(keyname, "SLIDE_", 6) == 0) {
+            const char *kn = keyname + 6;
+            while (*kn == ' ' || *kn == '\t') kn++;
+            SDL_Keycode kc = parse_key_name(kn);
+            if (kc == SDLK_UNKNOWN) {
+                LOGW("Unknown slide key: %s", kn);
+                continue;
+            }
+            int x1, y1, dx, dy, dur = 200;
+            int n = sscanf(colon + 1, "%d , %d , %d , %d , %d",
+                           &x1, &y1, &dx, &dy, &dur);
+            if (n < 4) {
+                n = sscanf(colon + 1, "%d %d %d %d %d",
+                           &x1, &y1, &dx, &dy, &dur);
+            }
+            if (n < 4) {
+                LOGW("Invalid slide: %s", keyname);
+                continue;
+            }
+            if (n < 5) dur = 200;
+            if (dur < 20) dur = 20;
+            add_custom_slide(kc, x1, y1, dx, dy, dur);
+            LOGI("Loaded slide: %s -> from (%d,%d) delta (%d,%d) in %dms",
+                 kn, x1, y1, dx, dy, dur);
+            continue;
+        }
+        // ==================== 滑动识别结束 ====================
+
+        int x, y;
+        if (sscanf(colon + 1, "%d , %d", &x, &y) != 2 &&
+            sscanf(colon + 1, "%d %d", &x, &y) != 2) {
             continue;
         }
 
@@ -315,43 +506,10 @@ load_mappings(void) {
         }
     }
     fclose(f);
-    LOGI("Loaded %d custom mappings, %d combos",
-         g_custom_mapping_count, g_custom_combo_count);
+    LOGI("Loaded %d mappings, %d combos, %d slides",
+         g_custom_mapping_count, g_custom_combo_count, g_custom_slide_count);
 }
 
-static struct sc_custom_mapping *
-find_mapping(SDL_Keycode keycode) {
-    for (int i = 0; i < g_custom_mapping_count; ++i) {
-        if (g_custom_mappings[i].keycode == keycode) {
-            return &g_custom_mappings[i];
-        }
-    }
-    return NULL;
-}
-
-// 直接发送手机坐标的触摸事件
-static bool
-inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
-                int32_t x, int32_t y, uint64_t pointer_id) {
-    bool up = action == AMOTION_EVENT_ACTION_UP;
-
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT;
-    msg.inject_touch_event.action = action;
-    msg.inject_touch_event.position.screen_size = im->screen->frame_size;
-    msg.inject_touch_event.position.point.x = x;
-    msg.inject_touch_event.position.point.y = y;
-    msg.inject_touch_event.pointer_id = pointer_id;
-    msg.inject_touch_event.pressure = up ? 0.0f : 1.0f;
-    msg.inject_touch_event.action_button = 0;
-    msg.inject_touch_event.buttons = 0;
-
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'inject custom touch event'");
-        return false;
-    }
-    return true;
-}
 // ==================== 自定义映射结束 ====================
 
 
@@ -728,6 +886,44 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             return;
         }
 
+        // ==================== 滑动拦截 ====================
+        struct sc_custom_slide *s = find_slide(sdl_keycode);
+        if (s) {
+            if (down && !repeat) {
+                if (!s->running) {
+                    s->running = true;
+                    s->stop_requested = false;
+
+                    struct slide_ctx *ctx = malloc(sizeof(*ctx));
+                    if (ctx) {
+                        ctx->slide = s;
+                        ctx->controller = im->controller;
+                        ctx->frame_size = im->screen->frame_size;
+                        SDL_Thread *t = SDL_CreateThread(slide_thread,
+                                                         "scrcpy-slide", ctx);
+                        if (t) {
+                            SDL_DetachThread(t);
+                            LOGI("Slide start: from (%d,%d) delta (%d,%d) in %dms",
+                                 s->x1, s->y1, s->dx, s->dy, s->duration_ms);
+                        } else {
+                            free(ctx);
+                            s->running = false;
+                            LOGW("Could not start slide thread: %s", SDL_GetError());
+                        }
+                    } else {
+                        s->running = false;
+                    }
+                }
+            } else if (!down) {
+                if (s->running) {
+                    s->stop_requested = true;
+                    LOGI("Slide stop requested");
+                }
+            }
+            return;
+        }
+        // ==================== 滑动拦截结束 ====================
+
         // Escape 映射
         if (sdl_keycode == SDLK_ESCAPE) {
             struct sc_custom_mapping *m = find_mapping(SDLK_ESCAPE);
@@ -740,36 +936,27 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                 inject_touch_at(im, action, m->x, m->y, m->pointer_id);
                 m->down = down;
                 return;
-            } else {
-                enum android_motionevent_action action = down
-                    ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-                inject_touch_at(im, action, 1776, 155, (uint64_t)-23);
-                return;
             }
         }
 
-                // 记录按键状态
+        // 单键 / 组合键拦截
         bool is_mapping_key = find_mapping(sdl_keycode) != NULL;
         bool is_combo_key = key_in_combo(sdl_keycode);
         if (is_mapping_key || is_combo_key) {
-            if (down && repeat) return;  // 忽略键盘自动重复
+            if (down && repeat) return;
 
-            // 更新全局按下状态
             if (down) {
                 g_pressed[sdl_keycode & 0xFF] = true;
             } else {
                 g_pressed[sdl_keycode & 0xFF] = false;
             }
 
-            // 优先检查 combo：先更新 combo 状态
             if (g_custom_combo_count > 0) {
                 update_combos(im);
             }
 
-            // 单键处理：如果该键没有被任何 combo 覆盖，或没有活跃 combo 覆盖它
             struct sc_custom_mapping *m = find_mapping(sdl_keycode);
             if (m) {
-                // 如果该键属于某个已激活的 combo，则跳过单键逻辑
                 bool covered_by_active_combo = false;
                 for (int i = 0; i < g_custom_combo_count; ++i) {
                     struct sc_custom_combo *c = &g_custom_combos[i];
@@ -791,7 +978,6 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                     inject_touch_at(im, action, m->x, m->y, m->pointer_id);
                     m->down = down;
                 } else if (!down && m->down) {
-                    // 从 combo 覆盖切换到不覆盖时，需要补发单键的 UP
                     m->down = false;
                     inject_touch_at(im, AMOTION_EVENT_ACTION_UP, m->x, m->y, m->pointer_id);
                 }
