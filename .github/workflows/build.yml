@@ -12,12 +12,37 @@ permissions:
   contents: write
 
 env:
-  # 请根据你的源码实际版本修改服务端 URL
-  # 官方 releases: https://github.com/Genymobile/scrcpy/releases
-  PREBUILT_SERVER_URL: 'https://github.com/Genymobile/scrcpy/releases/download/v3.2/scrcpy-server-v3.2'
+  SCRCPY_VERSION: '5.0.1'  # 与你的源码版本保持一致
+  PREBUILT_SERVER_URL: 'https://github.com/Genymobile/scrcpy/releases/download/v3.2/scrcpy-server-v3.2'  # 如需预编译服务端则保留
 
 jobs:
+  # ==================== 编译服务端（如果修改了 Java 代码） ====================
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 编译服务端
+        run: |
+          cd server
+          ./gradlew assembleRelease
+          ls -lh build/outputs/apk/release/
+
+      - name: 上传服务端产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrcpy-server
+          path: server/build/outputs/apk/release/server-release-unsigned.apk
+
+  # ==================== 编译 Windows 客户端 ====================
   build-windows:
+    needs: build-server  # 确保服务端先编译
     runs-on: windows-latest
     defaults:
       run:
@@ -41,16 +66,22 @@ jobs:
             mingw-w64-x86_64-libusb
             zip
 
-      - name: 下载预编译服务端
+      - name: 下载服务端产物
+        uses: actions/download-artifact@v4
+        with:
+          name: scrcpy-server
+          path: server-artifact
+
+      - name: 重命名服务端文件
         run: |
-          wget "$PREBUILT_SERVER_URL" -O scrcpy-server
-          ls -lh scrcpy-server
+          mv server-artifact/server-release-unsigned.apk server-artifact/scrcpy-server
+          ls -lh server-artifact/scrcpy-server
 
       - name: 配置 Meson
         run: |
           meson setup build --buildtype=release --strip \
             -Db_lto=true \
-            -Dprebuilt_server=$(pwd)/scrcpy-server \
+            -Dprebuilt_server=$(pwd)/server-artifact/scrcpy-server \
             -Dcompile_server=false
 
       - name: 编译
@@ -60,9 +91,13 @@ jobs:
         run: |
           mkdir -p dist/scrcpy-win64
           cp build/app/scrcpy.exe dist/scrcpy-win64/scrcpy.exe
-          cp scrcpy-server dist/scrcpy-win64/scrcpy-server
+          cp server-artifact/scrcpy-server dist/scrcpy-win64/scrcpy-server
           # 收集运行时需要的 MinGW DLL
           ldd build/app/scrcpy.exe | grep mingw64 | awk '{print $3}' | xargs -I{} cp {} dist/scrcpy-win64/ || true
+          # 复制映射文件（如果存在）
+          if [ -f scrcpy_mappings.txt ]; then
+            cp scrcpy_mappings.txt dist/scrcpy-win64/
+          fi
           cd dist
           zip -r scrcpy-win64.zip scrcpy-win64
 
@@ -71,8 +106,9 @@ jobs:
           name: windows-package
           path: dist/scrcpy-win64.zip
 
+  # ==================== 创建 Release ====================
   release:
-    needs: build-windows
+    needs: [build-server, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: 下载产物
@@ -104,7 +140,8 @@ jobs:
             基于 scrcpy 源码编译，添加了按键到屏幕坐标的触摸注入功能。
 
             ### 使用
-            解压后直接运行 `scrcpy.exe`，连接已开启 USB 调试的手机即可。
+            1. 解压后，将 `scrcpy_mappings.txt` 放在 `scrcpy.exe` 同目录。
+            2. 双击 `scrcpy.exe` 运行，连接已开启 USB 调试的手机即可。
 
             编译时间：${{ github.event.repository.updated_at }}
           draft: false
