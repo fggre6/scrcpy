@@ -497,12 +497,12 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
     private boolean injectTouch(int action, long pointerId, Position position, float pressure, int actionButton, int buttons) {
         long now = SystemClock.uptimeMillis();
 
-        Ln.i("injectTouch ENTER: pointerId=" + pointerId
+                Ln.i("injectTouch ENTER: pointerId=" + pointerId
                 + " action=" + action
                 + " buttons=" + buttons
                 + " actionButton=" + actionButton
                 + " pos=" + position.getPoint().getX() + "," + position.getPoint().getY()
-                + " pointersBefore=" + pointersState.getPointerCount());
+                + " pointersBefore=" + pointersState.size());
 
         Pair<Point, Integer> pair = getEventPointAndDisplayId(position);
         if (pair == null) {
