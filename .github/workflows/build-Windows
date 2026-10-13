@@ -1,0 +1,121 @@
+name: Build scrcpy Windows Client
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release 标签名（如 v1.0，留空则自动生成）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  SCRCPY_VERSION: '5.0.1'
+
+jobs:
+  # ==================== 编译 Windows 客户端 ====================
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-sdl3
+            mingw-w64-x86_64-ffmpeg
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-curl
+            zip
+
+      - name: 下载官方预编译服务端
+        run: |
+          mkdir -p server-artifact
+          curl -L --fail -o server-artifact/scrcpy-server \
+            "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-server-v${SCRCPY_VERSION}"
+          ls -lh server-artifact/scrcpy-server
+
+      - name: 配置 Meson
+        run: |
+          meson setup build --buildtype=release --strip \
+            -Db_lto=true \
+            -Dprebuilt_server=$(pwd)/server-artifact/scrcpy-server \
+            -Dcompile_server=false
+
+      - name: 编译
+        run: ninja -C build
+
+      - name: 打包
+        run: |
+          mkdir -p dist/scrcpy-win64
+          cp build/app/scrcpy.exe dist/scrcpy-win64/scrcpy.exe
+          cp server-artifact/scrcpy-server dist/scrcpy-win64/scrcpy-server
+          # 收集运行时需要的 MinGW DLL
+          ldd build/app/scrcpy.exe | grep mingw64 | awk '{print $3}' | xargs -I{} cp {} dist/scrcpy-win64/ || true
+          # 复制映射文件（如果存在）
+          if [ -f scrcpy_mappings.txt ]; then
+            cp scrcpy_mappings.txt dist/scrcpy-win64/
+          fi
+          cd dist
+          zip -r scrcpy-win64.zip scrcpy-win64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: dist/scrcpy-win64.zip
+
+  # ==================== 创建 Release ====================
+  release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-package
+          path: artifacts
+
+      - name: 列出文件
+        run: find artifacts -type f -exec ls -lh {} \;
+
+      - name: 生成标签名
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=build-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 创建 Release 并上传
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "scrcpy Windows Custom Build ${{ steps.tag.outputs.tag }}"
+          body: |
+            ## scrcpy 自定义按键映射版本（Windows 64 位）
+
+            基于 scrcpy 源码编译，添加了按键到屏幕坐标的触摸注入功能。
+            服务端使用官方预编译版本 v${{ env.SCRCPY_VERSION }}。
+
+            ### 使用
+            1. 解压后，将 `scrcpy_mappings.txt` 放在 `scrcpy.exe` 同目录。
+            2. 双击 `scrcpy.exe` 运行，连接已开启 USB 调试的手机即可。
+
+            编译时间：${{ github.event.repository.updated_at }}
+          draft: false
+          prerelease: false
+          files: artifacts/scrcpy-win64.zip
