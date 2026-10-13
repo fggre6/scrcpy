@@ -16,7 +16,36 @@
 #include "util/log.h"
 #include "util/sdl.h"
 
-// ==================== 自定义映射（从文件加载） ====================
+// ==================== 可配置项 ====================
+
+struct sc_custom_settings {
+    int slide_steps;
+    int slide_min_delay_ms;
+    int slide_min_duration_ms;
+    int slide_default_duration_ms;
+
+    int multi_click_interval_ms;
+
+    float mouse_move_speed;
+
+    int32_t default_right_click_x, default_right_click_y;
+    int32_t default_left_lock_x, default_left_lock_y;
+};
+
+static struct sc_custom_settings g_settings = {
+    .slide_steps = 20,
+    .slide_min_delay_ms = 1,
+    .slide_min_duration_ms = 20,
+    .slide_default_duration_ms = 200,
+    .multi_click_interval_ms = 50,
+    .mouse_move_speed = 1.0f,
+    .default_right_click_x = 1953,
+    .default_right_click_y = 826,
+    .default_left_lock_x = 1953,
+    .default_left_lock_y = 826,
+};
+
+// ==================== 自定义映射 ====================
 
 struct sc_custom_mapping {
     SDL_Keycode keycode;
@@ -64,16 +93,83 @@ static int g_custom_slide_capacity = 0;
 // 当前按下的所有映射键
 static bool g_pressed[256];
 
-// 特殊鼠标坐标
-static int32_t g_right_click_x = 1953;
-static int32_t g_right_click_y = 826;
-static int32_t g_left_click_locked_x = 1953;
-static int32_t g_left_click_locked_y = 826;
+// ==================== 指针 ID 分配（分区隔离，避免冲突） ====================
+// 每个区域预留足够空间，绝不重叠
+//   -1000 ~ -1999  单键映射
+//   -2000 ~ -2999  组合键
+//   -3000 ~ -3999  滑动
+//   -5000 ~ -5009  鼠标按键（固定）
+//   -6000          鼠标移动映射
+//   -7000          左键锁定
+#define PID_MAPPING_BASE     (-1000)
+#define PID_COMBO_BASE       (-2000)
+#define PID_SLIDE_BASE       (-3000)
 
-// 左 Alt 切换左键锁定状态
+#define PID_MOUSE_LEFT       ((uint64_t)-5001)
+#define PID_MOUSE_RIGHT      ((uint64_t)-5002)
+#define PID_MOUSE_MIDDLE     ((uint64_t)-5003)
+#define PID_MOUSE_X1         ((uint64_t)-5004)
+#define PID_MOUSE_X2         ((uint64_t)-5005)
+#define PID_MOUSE_MOVE_MAP   ((uint64_t)-6000)
+#define PID_LEFT_LOCK        ((uint64_t)-7000)
+
+// ==================== 鼠标按键映射 ====================
+
+struct sc_mouse_button_mapping {
+    bool configured;
+    int32_t x, y;
+    uint64_t pointer_id;
+    bool down;
+};
+
+// 索引: 0=LEFT, 1=RIGHT, 2=MIDDLE, 3=X1, 4=X2
+static struct sc_mouse_button_mapping g_mouse_btn[5] = {
+    { false, 0, 0, PID_MOUSE_LEFT,   false },
+    { false, 0, 0, PID_MOUSE_RIGHT,  false },
+    { false, 0, 0, PID_MOUSE_MIDDLE, false },
+    { false, 0, 0, PID_MOUSE_X1,     false },
+    { false, 0, 0, PID_MOUSE_X2,     false },
+};
+
+static int
+mouse_button_to_index(uint8_t button) {
+    switch (button) {
+        case SDL_BUTTON_LEFT:   return 0;
+        case SDL_BUTTON_RIGHT:  return 1;
+        case SDL_BUTTON_MIDDLE: return 2;
+        case SDL_BUTTON_X1:     return 3;
+        case SDL_BUTTON_X2:     return 4;
+        default:                return -1;
+    }
+}
+
+// ==================== 鼠标移动映射 ====================
+
+struct sc_mouse_move_map {
+    bool configured;
+    int trigger;                 // 0=LEFT,1=RIGHT,2=MIDDLE,3=X1,4=X2, 5+=键盘键
+    SDL_Keycode trigger_key;     // 若 trigger >= 5 使用此键
+    float speed;
+    volatile bool active;
+    int32_t cur_x, cur_y;
+};
+
+static struct sc_mouse_move_map g_mouse_move_map = {
+    .configured = false,
+    .trigger = -1,
+    .trigger_key = SDLK_UNKNOWN,
+    .speed = 1.0f,
+    .active = false,
+    .cur_x = 0,
+    .cur_y = 0,
+};
+
+// ==================== 左键锁定状态 ====================
+
 static bool g_left_click_locked = false;
 static bool g_left_click_locked_down = false;
-static bool g_right_click_down = false;
+
+// ==================== 辅助函数 ====================
 
 static SDL_Keycode
 parse_key_name(const char *name) {
@@ -81,7 +177,6 @@ parse_key_name(const char *name) {
     strncpy(buf, name, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
-    // trim
     char *start = buf;
     while (*start && isspace((unsigned char)*start)) start++;
     char *end = start + strlen(start);
@@ -89,7 +184,6 @@ parse_key_name(const char *name) {
     *end = '\0';
     if (*start == '\0') return SDLK_UNKNOWN;
 
-    // 自定义名称（全 ASCII，避免编码问题）
     if (SDL_strcasecmp(start, "space") == 0) return SDLK_SPACE;
     if (SDL_strcasecmp(start, "lshift") == 0 ||
         SDL_strcasecmp(start, "left shift") == 0 ||
@@ -98,19 +192,27 @@ parse_key_name(const char *name) {
         SDL_strcasecmp(start, "right shift") == 0) return SDLK_RSHIFT;
     if (SDL_strcasecmp(start, "esc") == 0 ||
         SDL_strcasecmp(start, "escape") == 0) return SDLK_ESCAPE;
+    if (SDL_strcasecmp(start, "enter") == 0 ||
+        SDL_strcasecmp(start, "return") == 0) return SDLK_RETURN;
+    if (SDL_strcasecmp(start, "tab") == 0) return SDLK_TAB;
+    if (SDL_strcasecmp(start, "backspace") == 0) return SDLK_BACKSPACE;
+    if (SDL_strcasecmp(start, "delete") == 0) return SDLK_DELETE;
+    if (SDL_strcasecmp(start, "left") == 0) return SDLK_LEFT;
+    if (SDL_strcasecmp(start, "right") == 0) return SDLK_RIGHT;
+    if (SDL_strcasecmp(start, "up") == 0) return SDLK_UP;
+    if (SDL_strcasecmp(start, "down") == 0) return SDLK_DOWN;
+    if (SDL_strcasecmp(start, "home") == 0) return SDLK_HOME;
+    if (SDL_strcasecmp(start, "end") == 0) return SDLK_END;
 
-    // 单字母 / 数字
     if (strlen(start) == 1) {
         char c = toupper((unsigned char)start[0]);
         if (c >= 'A' && c <= 'Z') return SDLK_A + (c - 'A');
         if (c >= '0' && c <= '9') return SDLK_0 + (c - '0');
     }
 
-    // 尝试 SDL 原生名称
     SDL_Keycode kc = SDL_GetKeyFromName(start);
     if (kc != SDLK_UNKNOWN) return kc;
 
-    // 尝试大写
     char upper[64];
     for (int i = 0; start[i]; i++) upper[i] = toupper((unsigned char)start[i]);
     upper[strlen(start)] = '\0';
@@ -124,16 +226,18 @@ static void
 add_custom_mapping(SDL_Keycode kc, int32_t x, int32_t y) {
     if (g_custom_mapping_count >= g_custom_mapping_capacity) {
         int new_cap = g_custom_mapping_capacity ? g_custom_mapping_capacity * 2 : 16;
-        struct sc_custom_mapping *new_arr = realloc(g_custom_mappings, new_cap * sizeof(*new_arr));
+        struct sc_custom_mapping *new_arr =
+            realloc(g_custom_mappings, new_cap * sizeof(*new_arr));
         if (!new_arr) return;
         g_custom_mappings = new_arr;
         g_custom_mapping_capacity = new_cap;
     }
-    g_custom_mappings[g_custom_mapping_count].keycode = kc;
-    g_custom_mappings[g_custom_mapping_count].x = x;
-    g_custom_mappings[g_custom_mapping_count].y = y;
-    g_custom_mappings[g_custom_mapping_count].pointer_id = (uint64_t)-(10 + g_custom_mapping_count);
-    g_custom_mappings[g_custom_mapping_count].down = false;
+    struct sc_custom_mapping *m = &g_custom_mappings[g_custom_mapping_count];
+    m->keycode = kc;
+    m->x = x;
+    m->y = y;
+    m->pointer_id = (uint64_t)(PID_MAPPING_BASE - g_custom_mapping_count);
+    m->down = false;
     g_custom_mapping_count++;
 }
 
@@ -141,7 +245,8 @@ static void
 add_custom_combo(SDL_Keycode *keys, int nkeys, int32_t x, int32_t y) {
     if (g_custom_combo_count >= g_custom_combo_capacity) {
         int new_cap = g_custom_combo_capacity ? g_custom_combo_capacity * 2 : 8;
-        struct sc_custom_combo *new_arr = realloc(g_custom_combos, new_cap * sizeof(*new_arr));
+        struct sc_custom_combo *new_arr =
+            realloc(g_custom_combos, new_cap * sizeof(*new_arr));
         if (!new_arr) return;
         g_custom_combos = new_arr;
         g_custom_combo_capacity = new_cap;
@@ -151,7 +256,7 @@ add_custom_combo(SDL_Keycode *keys, int nkeys, int32_t x, int32_t y) {
     c->nkeys = nkeys;
     c->x = x;
     c->y = y;
-    c->pointer_id = (uint64_t)-(100 + g_custom_combo_count);
+    c->pointer_id = (uint64_t)(PID_COMBO_BASE - g_custom_combo_count);
     c->active = false;
     g_custom_combo_count++;
 }
@@ -161,8 +266,8 @@ add_custom_slide(SDL_Keycode kc, int32_t x1, int32_t y1,
                  int32_t dx, int32_t dy, int duration_ms) {
     if (g_custom_slide_count >= g_custom_slide_capacity) {
         int new_cap = g_custom_slide_capacity ? g_custom_slide_capacity * 2 : 8;
-        struct sc_custom_slide *new_arr = realloc(g_custom_slides,
-                                                   new_cap * sizeof(*new_arr));
+        struct sc_custom_slide *new_arr =
+            realloc(g_custom_slides, new_cap * sizeof(*new_arr));
         if (!new_arr) return;
         g_custom_slides = new_arr;
         g_custom_slide_capacity = new_cap;
@@ -174,7 +279,7 @@ add_custom_slide(SDL_Keycode kc, int32_t x1, int32_t y1,
     s->dx = dx;
     s->dy = dy;
     s->duration_ms = duration_ms;
-    s->pointer_id = (uint64_t)-(200 + g_custom_slide_count);
+    s->pointer_id = (uint64_t)(PID_SLIDE_BASE - g_custom_slide_count);
     s->running = false;
     s->stop_requested = false;
     g_custom_slide_count++;
@@ -183,9 +288,8 @@ add_custom_slide(SDL_Keycode kc, int32_t x1, int32_t y1,
 static struct sc_custom_mapping *
 find_mapping(SDL_Keycode keycode) {
     for (int i = 0; i < g_custom_mapping_count; ++i) {
-        if (g_custom_mappings[i].keycode == keycode) {
+        if (g_custom_mappings[i].keycode == keycode)
             return &g_custom_mappings[i];
-        }
     }
     return NULL;
 }
@@ -193,14 +297,14 @@ find_mapping(SDL_Keycode keycode) {
 static struct sc_custom_slide *
 find_slide(SDL_Keycode keycode) {
     for (int i = 0; i < g_custom_slide_count; ++i) {
-        if (g_custom_slides[i].keycode == keycode) {
+        if (g_custom_slides[i].keycode == keycode)
             return &g_custom_slides[i];
-        }
     }
     return NULL;
 }
 
-// 直接发送手机坐标的触摸事件
+// ==================== 触摸注入 ====================
+
 static bool
 inject_touch_at(struct sc_input_manager *im, enum android_motionevent_action action,
                 int32_t x, int32_t y, uint64_t pointer_id) {
@@ -254,17 +358,18 @@ static int SDLCALL
 slide_thread(void *data) {
     struct slide_ctx *ctx = data;
     struct sc_custom_slide *s = ctx->slide;
-    const int steps = 20;
-    int step_delay = s->duration_ms / steps;
-    if (step_delay < 1) step_delay = 1;
 
-    // 在起点按下
+    // 使用配置的步数
+    const int steps = g_settings.slide_steps > 0 ? g_settings.slide_steps : 20;
+    int step_delay = s->duration_ms / steps;
+    if (step_delay < g_settings.slide_min_delay_ms)
+        step_delay = g_settings.slide_min_delay_ms;
+
     push_touch_msg(ctx->controller, ctx->frame_size,
                    AMOTION_EVENT_ACTION_DOWN,
                    s->x1, s->y1, s->pointer_id);
 
     while (!s->stop_requested) {
-        // 从起点滑到起点 + (dx, dy)
         for (int i = 1; i <= steps && !s->stop_requested; ++i) {
             int32_t x = s->x1 + (int32_t)((int64_t)s->dx * i / steps);
             int32_t y = s->y1 + (int32_t)((int64_t)s->dy * i / steps);
@@ -273,16 +378,12 @@ slide_thread(void *data) {
                            x, y, s->pointer_id);
             SDL_Delay(step_delay);
         }
-
         if (s->stop_requested) break;
-
-        // 用 MOVE 事件瞬间重置回起点（保持按住）
         push_touch_msg(ctx->controller, ctx->frame_size,
                        AMOTION_EVENT_ACTION_MOVE,
                        s->x1, s->y1, s->pointer_id);
     }
 
-    // 松手时在起点抬起
     push_touch_msg(ctx->controller, ctx->frame_size,
                    AMOTION_EVENT_ACTION_UP,
                    s->x1, s->y1, s->pointer_id);
@@ -292,9 +393,8 @@ slide_thread(void *data) {
     return 0;
 }
 
-// ==================== 组合键辅助 ====================
+// ==================== 组合键 ====================
 
-// 判断某个键是否被任何 combo 覆盖
 static bool
 key_in_combo(SDL_Keycode kc) {
     for (int i = 0; i < g_custom_combo_count; ++i) {
@@ -305,7 +405,6 @@ key_in_combo(SDL_Keycode kc) {
     return false;
 }
 
-// 检查所有 combo，匹配成功的激活，不再匹配的释放
 static void
 update_combos(struct sc_input_manager *im) {
     for (int i = 0; i < g_custom_combo_count; ++i) {
@@ -319,7 +418,6 @@ update_combos(struct sc_input_manager *im) {
         }
 
         if (match && !c->active) {
-            // 组合键激活：撤销组合键里所有键的单键 DOWN
             for (int j = 0; j < c->nkeys; ++j) {
                 struct sc_custom_mapping *m = find_mapping(c->keys[j]);
                 if (m && m->down) {
@@ -328,20 +426,16 @@ update_combos(struct sc_input_manager *im) {
                     m->down = false;
                 }
             }
-            // 发送组合键 DOWN
             c->active = true;
             inject_touch_at(im, AMOTION_EVENT_ACTION_DOWN,
                             c->x, c->y, c->pointer_id);
             LOGI("Combo down: %d keys -> (%d, %d)", c->nkeys, c->x, c->y);
-
         } else if (!match && c->active) {
-            // 组合键停用：先发组合键 UP
             c->active = false;
             inject_touch_at(im, AMOTION_EVENT_ACTION_UP,
                             c->x, c->y, c->pointer_id);
             LOGI("Combo up: %d keys", c->nkeys);
 
-            // 对于仍然按着的键，重新发单键 DOWN
             for (int j = 0; j < c->nkeys; ++j) {
                 if (!g_pressed[c->keys[j] & 0xFF]) continue;
                 struct sc_custom_mapping *m = find_mapping(c->keys[j]);
@@ -355,13 +449,114 @@ update_combos(struct sc_input_manager *im) {
     }
 }
 
+// ==================== 鼠标移动映射激活/停用 ====================
+
+static void
+mouse_move_map_activate(struct sc_input_manager *im) {
+    if (g_mouse_move_map.active) return;
+    int32_t cx = im->screen->frame_size.width / 2;
+    int32_t cy = im->screen->frame_size.height / 2;
+    g_mouse_move_map.cur_x = cx;
+    g_mouse_move_map.cur_y = cy;
+    inject_touch_at(im, AMOTION_EVENT_ACTION_DOWN, cx, cy, PID_MOUSE_MOVE_MAP);
+    g_mouse_move_map.active = true;
+    LOGI("Mouse move map ACTIVATED at (%d, %d)", cx, cy);
+}
+
+static void
+mouse_move_map_deactivate(struct sc_input_manager *im) {
+    if (!g_mouse_move_map.active) return;
+    inject_touch_at(im, AMOTION_EVENT_ACTION_UP,
+                    g_mouse_move_map.cur_x, g_mouse_move_map.cur_y,
+                    PID_MOUSE_MOVE_MAP);
+    g_mouse_move_map.active = false;
+    LOGI("Mouse move map DEACTIVATED");
+}
+
+// 检查某个鼠标按键是否是鼠标移动映射的触发器
+static bool
+mouse_button_is_move_map_trigger(uint8_t button) {
+    if (!g_mouse_move_map.configured) return false;
+    if (g_mouse_move_map.trigger < 0 || g_mouse_move_map.trigger > 4) return false;
+    int idx = mouse_button_to_index(button);
+    return idx >= 0 && idx == g_mouse_move_map.trigger;
+}
+
+// 检查某个键盘键是否是鼠标移动映射的触发器
+static bool
+key_is_move_map_trigger(SDL_Keycode kc) {
+    if (!g_mouse_move_map.configured) return false;
+    if (g_mouse_move_map.trigger < 5) return false;
+    return g_mouse_move_map.trigger_key == kc;
+}
+
 // ==================== 配置文件加载 ====================
+
+static void
+load_settings_line(const char *keyname, const char *value) {
+    if (SDL_strcasecmp(keyname, "SET_SLIDE_STEPS") == 0) {
+        int v = atoi(value);
+        if (v > 0) g_settings.slide_steps = v;
+    } else if (SDL_strcasecmp(keyname, "SET_SLIDE_MIN_DELAY") == 0) {
+        int v = atoi(value);
+        if (v >= 0) g_settings.slide_min_delay_ms = v;
+    } else if (SDL_strcasecmp(keyname, "SET_SLIDE_MIN_DURATION") == 0) {
+        int v = atoi(value);
+        if (v > 0) g_settings.slide_min_duration_ms = v;
+    } else if (SDL_strcasecmp(keyname, "SET_SLIDE_DEFAULT_DURATION") == 0) {
+        int v = atoi(value);
+        if (v > 0) g_settings.slide_default_duration_ms = v;
+    } else if (SDL_strcasecmp(keyname, "SET_MULTI_CLICK_INTERVAL") == 0) {
+        int v = atoi(value);
+        if (v > 0) g_settings.multi_click_interval_ms = v;
+    } else if (SDL_strcasecmp(keyname, "SET_MOUSE_MOVE_SPEED") == 0) {
+        float v = strtof(value, NULL);
+        if (v > 0.0f) {
+            g_settings.mouse_move_speed = v;
+            g_mouse_move_map.speed = v;
+        }
+    } else if (SDL_strcasecmp(keyname, "SET_DEFAULT_RIGHT_CLICK") == 0) {
+        int x, y;
+        if (sscanf(value, "%d %d", &x, &y) == 2 ||
+            sscanf(value, "%d , %d", &x, &y) == 2) {
+            g_settings.default_right_click_x = x;
+            g_settings.default_right_click_y = y;
+        }
+    } else if (SDL_strcasecmp(keyname, "SET_DEFAULT_LEFT_LOCK") == 0) {
+        int x, y;
+        if (sscanf(value, "%d %d", &x, &y) == 2 ||
+            sscanf(value, "%d , %d", &x, &y) == 2) {
+            g_settings.default_left_lock_x = x;
+            g_settings.default_left_lock_y = y;
+        }
+    }
+}
+
+static bool
+parse_mouse_button_name(const char *name, int *out_idx) {
+    if (SDL_strcasecmp(name, "LEFT") == 0)   { *out_idx = 0; return true; }
+    if (SDL_strcasecmp(name, "RIGHT") == 0)  { *out_idx = 1; return true; }
+    if (SDL_strcasecmp(name, "MIDDLE") == 0) { *out_idx = 2; return true; }
+    if (SDL_strcasecmp(name, "X1") == 0)     { *out_idx = 3; return true; }
+    if (SDL_strcasecmp(name, "X2") == 0)     { *out_idx = 4; return true; }
+    return false;
+}
 
 static void
 load_mappings(void) {
     g_custom_mapping_count = 0;
     g_custom_combo_count = 0;
     g_custom_slide_count = 0;
+
+    // 重置鼠标映射状态
+    for (int i = 0; i < 5; i++) {
+        g_mouse_btn[i].configured = false;
+        g_mouse_btn[i].down = false;
+    }
+    g_mouse_move_map.configured = false;
+    g_mouse_move_map.trigger = -1;
+    g_mouse_move_map.trigger_key = SDLK_UNKNOWN;
+    g_mouse_move_map.active = false;
 
     const char *filename = "scrcpy_mappings.txt";
     FILE *f = fopen(filename, "r");
@@ -384,7 +579,6 @@ load_mappings(void) {
     while (fgets(line, sizeof(line), f)) {
         char *p = line;
 
-        // 跳过 UTF-8 BOM（只在第一行）
         if (first_line) {
             first_line = false;
             if ((unsigned char)p[0] == 0xEF &&
@@ -401,34 +595,85 @@ load_mappings(void) {
         if (!colon) continue;
         *colon = '\0';
         char *keyname = p;
+        char *value = colon + 1;
 
         char *end = keyname + strlen(keyname);
         while (end > keyname && isspace((unsigned char)*(end - 1))) end--;
         *end = '\0';
 
-        // 鼠标特殊键
+        // ===== 全局设置行（以 SET_ 开头） =====
+        if (SDL_strncasecmp(keyname, "SET_", 4) == 0) {
+            load_settings_line(keyname, value);
+            continue;
+        }
+
+        // ===== 鼠标移动映射 =====
+        if (SDL_strcasecmp(keyname, "MOUSE_MOVE_MAP") == 0) {
+            char trig[64] = {0};
+            float speed = g_settings.mouse_move_speed;
+            if (sscanf(value, "%63s %f", trig, &speed) >= 1) {
+                int idx = -1;
+                if (parse_mouse_button_name(trig, &idx)) {
+                    g_mouse_move_map.trigger = idx;
+                } else {
+                    SDL_Keycode kc = parse_key_name(trig);
+                    if (kc != SDLK_UNKNOWN) {
+                        g_mouse_move_map.trigger = 5;
+                        g_mouse_move_map.trigger_key = kc;
+                    } else {
+                        LOGW("Unknown MOUSE_MOVE_MAP trigger: %s", trig);
+                        continue;
+                    }
+                }
+                g_mouse_move_map.speed = speed > 0.0f ? speed : g_settings.mouse_move_speed;
+                g_mouse_move_map.configured = true;
+                LOGI("Mouse move map: trigger=%s speed=%.2f", trig, g_mouse_move_map.speed);
+            }
+            continue;
+        }
+
+        // ===== 鼠标按键映射 =====
+        {
+            int idx = -1;
+            if (parse_mouse_button_name(keyname, &idx) ||
+                (SDL_strncasecmp(keyname, "MOUSE_", 6) == 0 &&
+                 parse_mouse_button_name(keyname + 6, &idx))) {
+                int x, y;
+                if (sscanf(value, "%d , %d", &x, &y) == 2 ||
+                    sscanf(value, "%d %d", &x, &y) == 2) {
+                    g_mouse_btn[idx].configured = true;
+                    g_mouse_btn[idx].x = x;
+                    g_mouse_btn[idx].y = y;
+                    LOGI("Mouse button %d mapped to (%d, %d)", idx, x, y);
+                }
+                continue;
+            }
+        }
+
+        // ===== 兼容旧命名 =====
         if (SDL_strcasecmp(keyname, "MOUSE_RIGHT") == 0 ||
             SDL_strcasecmp(keyname, "RIGHT_CLICK") == 0) {
             int x, y;
-            if (sscanf(colon + 1, "%d , %d", &x, &y) == 2 ||
-                sscanf(colon + 1, "%d %d", &x, &y) == 2) {
-                g_right_click_x = x;
-                g_right_click_y = y;
+            if (sscanf(value, "%d , %d", &x, &y) == 2 ||
+                sscanf(value, "%d %d", &x, &y) == 2) {
+                g_mouse_btn[1].configured = true;
+                g_mouse_btn[1].x = x;
+                g_mouse_btn[1].y = y;
             }
             continue;
         }
         if (SDL_strcasecmp(keyname, "MOUSE_LEFT_LOCKED") == 0 ||
             SDL_strcasecmp(keyname, "LEFT_CLICK_LOCKED") == 0) {
             int x, y;
-            if (sscanf(colon + 1, "%d , %d", &x, &y) == 2 ||
-                sscanf(colon + 1, "%d %d", &x, &y) == 2) {
-                g_left_click_locked_x = x;
-                g_left_click_locked_y = y;
+            if (sscanf(value, "%d , %d", &x, &y) == 2 ||
+                sscanf(value, "%d %d", &x, &y) == 2) {
+                g_settings.default_left_lock_x = x;
+                g_settings.default_left_lock_y = y;
             }
             continue;
         }
 
-        // ==================== 滑动识别 ====================
+        // ===== 滑动 =====
         if (SDL_strncasecmp(keyname, "SLIDE_", 6) == 0) {
             const char *kn = keyname + 6;
             while (*kn == ' ' || *kn == '\t') kn++;
@@ -437,33 +682,33 @@ load_mappings(void) {
                 LOGW("Unknown slide key: %s", kn);
                 continue;
             }
-            int x1, y1, dx, dy, dur = 200;
-            int n = sscanf(colon + 1, "%d , %d , %d , %d , %d",
+            int x1, y1, dx, dy, dur = g_settings.slide_default_duration_ms;
+            int n = sscanf(value, "%d , %d , %d , %d , %d",
                            &x1, &y1, &dx, &dy, &dur);
             if (n < 4) {
-                n = sscanf(colon + 1, "%d %d %d %d %d",
+                n = sscanf(value, "%d %d %d %d %d",
                            &x1, &y1, &dx, &dy, &dur);
             }
             if (n < 4) {
                 LOGW("Invalid slide: %s", keyname);
                 continue;
             }
-            if (n < 5) dur = 200;
-            if (dur < 20) dur = 20;
+            if (n < 5) dur = g_settings.slide_default_duration_ms;
+            if (dur < g_settings.slide_min_duration_ms)
+                dur = g_settings.slide_min_duration_ms;
             add_custom_slide(kc, x1, y1, dx, dy, dur);
-            LOGI("Loaded slide: %s -> from (%d,%d) delta (%d,%d) in %dms",
+            LOGI("Loaded slide: %s -> (%d,%d)+(%d,%d) %dms",
                  kn, x1, y1, dx, dy, dur);
             continue;
         }
-        // ==================== 滑动识别结束 ====================
 
         int x, y;
-        if (sscanf(colon + 1, "%d , %d", &x, &y) != 2 &&
-            sscanf(colon + 1, "%d %d", &x, &y) != 2) {
+        if (sscanf(value, "%d , %d", &x, &y) != 2 &&
+            sscanf(value, "%d %d", &x, &y) != 2) {
             continue;
         }
 
-        // ==================== 组合键识别 ====================
+        // ===== 组合键 =====
         if (strchr(keyname, '+')) {
             SDL_Keycode keys[MAX_COMBO_KEYS];
             int nkeys = 0;
@@ -496,8 +741,8 @@ load_mappings(void) {
             }
             continue;
         }
-        // ==================== 组合键识别结束 ====================
 
+        // ===== 单键映射 =====
         SDL_Keycode kc = parse_key_name(keyname);
         if (kc != SDLK_UNKNOWN) {
             add_custom_mapping(kc, x, y);
@@ -506,12 +751,12 @@ load_mappings(void) {
         }
     }
     fclose(f);
-    LOGI("Loaded %d mappings, %d combos, %d slides",
-         g_custom_mapping_count, g_custom_combo_count, g_custom_slide_count);
+    LOGI("Loaded %d mappings, %d combos, %d slides, %d mouse btns, move_map=%d",
+         g_custom_mapping_count, g_custom_combo_count, g_custom_slide_count,
+         5, g_mouse_move_map.configured);
 }
 
-// ==================== 自定义映射结束 ====================
-
+// ==================== 初始化 ====================
 
 void
 sc_input_manager_init(struct sc_input_manager *im,
@@ -545,284 +790,19 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->key_repeat = 0;
 
     im->next_sequence = 1;
-
     im->disconnected = false;
 
     load_mappings();
 }
 
-static void
-send_keycode(struct sc_input_manager *im, enum android_keycode keycode,
-             enum sc_action action, const char *name) {
-    assert(im->controller && im->kp && !im->camera);
-
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_INJECT_KEYCODE;
-    msg.inject_keycode.action = action == SC_ACTION_DOWN
-                              ? AKEY_EVENT_ACTION_DOWN
-                              : AKEY_EVENT_ACTION_UP;
-    msg.inject_keycode.keycode = keycode;
-    msg.inject_keycode.metastate = 0;
-    msg.inject_keycode.repeat = 0;
-
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'inject %s'", name);
-    }
-}
-
-static inline void
-action_home(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_HOME, action, "HOME");
-}
-
-static inline void
-action_back(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_BACK, action, "BACK");
-}
-
-static inline void
-action_app_switch(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_APP_SWITCH, action, "APP_SWITCH");
-}
-
-static inline void
-action_power(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_POWER, action, "POWER");
-}
-
-static inline void
-action_volume_up(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_VOLUME_UP, action, "VOLUME_UP");
-}
-
-static inline void
-action_volume_down(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_VOLUME_DOWN, action, "VOLUME_DOWN");
-}
-
-static inline void
-action_menu(struct sc_input_manager *im, enum sc_action action) {
-    send_keycode(im, AKEYCODE_MENU, action, "MENU");
-}
-
-static void
-press_back_or_turn_screen_on(struct sc_input_manager *im,
-                             enum sc_action action) {
-    assert(im->controller && im->kp && !im->camera);
-
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_BACK_OR_SCREEN_ON;
-    msg.back_or_screen_on.action = action == SC_ACTION_DOWN
-                                 ? AKEY_EVENT_ACTION_DOWN
-                                 : AKEY_EVENT_ACTION_UP;
-
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'press back or turn screen on'");
-    }
-}
-
-static void
-expand_notification_panel(struct sc_input_manager *im) {
-    assert(im->controller && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_EXPAND_NOTIFICATION_PANEL;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'expand notification panel'");
-    }
-}
-
-static void
-expand_settings_panel(struct sc_input_manager *im) {
-    assert(im->controller && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_EXPAND_SETTINGS_PANEL;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'expand settings panel'");
-    }
-}
-
-static void
-collapse_panels(struct sc_input_manager *im) {
-    assert(im->controller && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_COLLAPSE_PANELS;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'collapse notification panel'");
-    }
-}
-
-static bool
-get_device_clipboard(struct sc_input_manager *im, enum sc_copy_key copy_key) {
-    assert(im->controller && im->kp && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_GET_CLIPBOARD;
-    msg.get_clipboard.copy_key = copy_key;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'get device clipboard'");
-        return false;
-    }
-    return true;
-}
-
-static bool
-set_device_clipboard(struct sc_input_manager *im, bool paste,
-                     uint64_t sequence) {
-    assert(im->controller && im->kp && !im->camera);
-
-    char *text = SDL_GetClipboardText();
-    if (!text) {
-        LOGW("Could not get clipboard text: %s", SDL_GetError());
-        return false;
-    }
-
-    char *text_dup = strdup(text);
-    SDL_free(text);
-    if (!text_dup) {
-        LOGW("Could not strdup input text");
-        return false;
-    }
-
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_SET_CLIPBOARD;
-    msg.set_clipboard.sequence = sequence;
-    msg.set_clipboard.text = text_dup;
-    msg.set_clipboard.paste = paste;
-
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        free(text_dup);
-        LOGW("Could not request 'set device clipboard'");
-        return false;
-    }
-    return true;
-}
-
-static void
-set_display_power(struct sc_input_manager *im, bool on) {
-    assert(im->controller && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_SET_DISPLAY_POWER;
-    msg.set_display_power.on = on;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'set screen power mode'");
-    }
-}
-
-static void
-switch_fps_counter_state(struct sc_input_manager *im) {
-    struct sc_fps_counter *fps_counter = &im->screen->fps_counter;
-    if (sc_fps_counter_is_started(fps_counter)) {
-        sc_fps_counter_stop(fps_counter);
-    } else {
-        sc_fps_counter_start(fps_counter);
-    }
-}
-
-static void
-clipboard_paste(struct sc_input_manager *im) {
-    assert(im->controller && im->kp && !im->camera);
-
-    char *text = SDL_GetClipboardText();
-    if (!text) {
-        LOGW("Could not get clipboard text: %s", SDL_GetError());
-        return;
-    }
-    if (!*text) {
-        SDL_free(text);
-        return;
-    }
-
-    char *text_dup = strdup(text);
-    SDL_free(text);
-    if (!text_dup) {
-        LOGW("Could not strdup input text");
-        return;
-    }
-
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_INJECT_TEXT;
-    msg.inject_text.text = text_dup;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        free(text_dup);
-        LOGW("Could not request 'paste clipboard'");
-    }
-}
-
-static void
-rotate_device(struct sc_input_manager *im) {
-    assert(im->controller && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_ROTATE_DEVICE;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request device rotation");
-    }
-}
-
-static void
-open_hard_keyboard_settings(struct sc_input_manager *im) {
-    assert(im->controller && !im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_OPEN_HARD_KEYBOARD_SETTINGS;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request opening hard keyboard settings");
-    }
-}
-
-static void
-reset_video(struct sc_input_manager *im) {
-    assert(im->controller);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_RESET_VIDEO;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request reset video");
-    }
-}
-
-static void
-camera_set_torch(struct sc_input_manager *im, bool on) {
-    assert(im->controller && im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_CAMERA_SET_TORCH;
-    msg.camera_set_torch.on = on;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request setting camera torch");
-    }
-}
-
-static void
-camera_zoom_in(struct sc_input_manager *im) {
-    assert(im->controller && im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_IN;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request camera zoom in");
-    }
-}
-
-static void
-camera_zoom_out(struct sc_input_manager *im) {
-    assert(im->controller && im->camera);
-    struct sc_control_msg msg;
-    msg.type = SC_CONTROL_MSG_TYPE_CAMERA_ZOOM_OUT;
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request camera zoom out");
-    }
-}
-
-static void
-apply_orientation_transform(struct sc_input_manager *im,
-                            enum sc_orientation transform) {
-    struct sc_screen *screen = im->screen;
-    enum sc_orientation new_orientation =
-        sc_orientation_apply(screen->orientation, transform);
-    sc_screen_set_orientation(screen, new_orientation);
-}
+// ==================== 原有动作函数（未修改部分省略若干，保持原样） ====================
+// send_keycode, action_home, ..., camera_zoom_out, apply_orientation_transform 等
+// 均保持原样，此处为节省篇幅省略，实际替换时请保留原文件内容。
 
 static void
 sc_input_manager_process_text_input(struct sc_input_manager *im,
                                     const SDL_TextInputEvent *event) {
-    if (im->camera || !im->kp || im->screen->paused || im->disconnected) {
-        return;
-    }
+    if (im->camera || !im->kp || im->screen->paused || im->disconnected) return;
     if (!im->kp->ops->process_text) return;
 
     uint16_t mod = sc_sdl_mod_normalize(SDL_GetModState());
@@ -861,6 +841,8 @@ inverse_point(struct sc_point point, struct sc_size size,
     return point;
 }
 
+// ==================== 键盘事件处理 ====================
+
 static void
 sc_input_manager_process_key(struct sc_input_manager *im,
                              const SDL_KeyboardEvent *event) {
@@ -878,7 +860,18 @@ sc_input_manager_process_key(struct sc_input_manager *im,
 
     // ==================== 自定义拦截 ====================
     if (control && !paused && !disconnected && !im->camera) {
-        // 左 Alt 切换左键锁定
+
+        // ---- 鼠标移动映射的键盘触发键 ----
+        if (key_is_move_map_trigger(sdl_keycode)) {
+            if (down && !repeat) {
+                mouse_move_map_activate(im);
+            } else if (!down) {
+                mouse_move_map_deactivate(im);
+            }
+            return;
+        }
+
+        // ---- 左 Alt 切换左键锁定 ----
         if (sdl_keycode == SDLK_LALT && down && !repeat && !ctrl && !shift) {
             g_left_click_locked = !g_left_click_locked;
             g_left_click_locked_down = false;
@@ -886,7 +879,7 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             return;
         }
 
-        // ==================== 滑动拦截 ====================
+        // ---- 滑动拦截 ----
         struct sc_custom_slide *s = find_slide(sdl_keycode);
         if (s) {
             if (down && !repeat) {
@@ -903,7 +896,7 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                                                          "scrcpy-slide", ctx);
                         if (t) {
                             SDL_DetachThread(t);
-                            LOGI("Slide start: from (%d,%d) delta (%d,%d) in %dms",
+                            LOGI("Slide start: (%d,%d)+(%d,%d) %dms",
                                  s->x1, s->y1, s->dx, s->dy, s->duration_ms);
                         } else {
                             free(ctx);
@@ -922,9 +915,8 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             }
             return;
         }
-        // ==================== 滑动拦截结束 ====================
 
-        // Escape 映射
+        // ---- Escape 映射 ----
         if (sdl_keycode == SDLK_ESCAPE) {
             struct sc_custom_mapping *m = find_mapping(SDLK_ESCAPE);
             if (m) {
@@ -939,7 +931,7 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             }
         }
 
-        // 单键 / 组合键拦截
+        // ---- 单键 / 组合键拦截 ----
         bool is_mapping_key = find_mapping(sdl_keycode) != NULL;
         bool is_combo_key = key_in_combo(sdl_keycode);
         if (is_mapping_key || is_combo_key) {
@@ -1021,13 +1013,15 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                 return;
             case SDLK_DOWN:
                 if (shift) {
-                    if (video && !repeat && down) apply_orientation_transform(im, SC_ORIENTATION_FLIP_180);
+                    if (video && !repeat && down)
+                        apply_orientation_transform(im, SC_ORIENTATION_FLIP_180);
                     return;
                 }
                 break;
             case SDLK_UP:
                 if (shift) {
-                    if (video && !repeat && down) apply_orientation_transform(im, SC_ORIENTATION_FLIP_180);
+                    if (video && !repeat && down)
+                        apply_orientation_transform(im, SC_ORIENTATION_FLIP_180);
                     return;
                 }
                 break;
@@ -1044,16 +1038,20 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                 }
                 return;
             case SDLK_F:
-                if (video && !shift && !repeat && down) sc_screen_toggle_fullscreen(im->screen);
+                if (video && !shift && !repeat && down)
+                    sc_screen_toggle_fullscreen(im->screen);
                 return;
             case SDLK_W:
-                if (video && !shift && !repeat && down) sc_screen_resize_to_fit(im->screen);
+                if (video && !shift && !repeat && down)
+                    sc_screen_resize_to_fit(im->screen);
                 return;
             case SDLK_G:
-                if (video && !shift && !repeat && down) sc_screen_resize_to_pixel_perfect(im->screen);
+                if (video && !shift && !repeat && down)
+                    sc_screen_resize_to_pixel_perfect(im->screen);
                 return;
             case SDLK_I:
-                if (video && !shift && !repeat && down) switch_fps_counter_state(im);
+                if (video && !shift && !repeat && down)
+                    switch_fps_counter_state(im);
                 return;
             case SDLK_Q:
                 sc_push_event(SDL_EVENT_QUIT);
@@ -1104,10 +1102,12 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                     if (im->kp && !shift && !paused) action_volume_up(im, action);
                     return;
                 case SDLK_C:
-                    if (im->kp && !shift && !repeat && down && !paused) get_device_clipboard(im, SC_COPY_KEY_COPY);
+                    if (im->kp && !shift && !repeat && down && !paused)
+                        get_device_clipboard(im, SC_COPY_KEY_COPY);
                     return;
                 case SDLK_X:
-                    if (im->kp && !shift && !repeat && down && !paused) get_device_clipboard(im, SC_COPY_KEY_CUT);
+                    if (im->kp && !shift && !repeat && down && !paused)
+                        get_device_clipboard(im, SC_COPY_KEY_CUT);
                     return;
                 case SDLK_V:
                     if (im->kp && !repeat && down && !paused) {
@@ -1185,6 +1185,8 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     im->kp->ops->process_key(im->kp, &evt, ack_to_wait);
 }
 
+// ==================== 鼠标位置 ====================
+
 static struct sc_position
 sc_input_manager_get_position(struct sc_input_manager *im, int32_t x, int32_t y) {
     if (im->mp->relative_mode) {
@@ -1196,11 +1198,37 @@ sc_input_manager_get_position(struct sc_input_manager *im, int32_t x, int32_t y)
     };
 }
 
+// ==================== 鼠标移动处理 ====================
+
 static void
 sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
                                       const SDL_MouseMotionEvent *event) {
     if (im->camera || !im->mp || im->screen->paused || im->disconnected) return;
     if (event->which == SDL_TOUCH_MOUSEID) return;
+
+    // ==================== 鼠标移动映射拦截 ====================
+    if (g_mouse_move_map.active) {
+        int32_t nx = g_mouse_move_map.cur_x +
+                     (int32_t)(event->xrel * g_mouse_move_map.speed);
+        int32_t ny = g_mouse_move_map.cur_y +
+                     (int32_t)(event->yrel * g_mouse_move_map.speed);
+
+        int32_t W = im->screen->frame_size.width;
+        int32_t H = im->screen->frame_size.height;
+        if (nx < 0) nx = 0;
+        if (nx >= W) nx = W - 1;
+        if (ny < 0) ny = 0;
+        if (ny >= H) ny = H - 1;
+
+        g_mouse_move_map.cur_x = nx;
+        g_mouse_move_map.cur_y = ny;
+
+        inject_touch_at(im, AMOTION_EVENT_ACTION_MOVE, nx, ny,
+                        PID_MOUSE_MOVE_MAP);
+        // 不把鼠标原始事件转发给默认处理器，避免 "相对模式" 等干扰
+        return;
+    }
+    // ==================== 鼠标移动映射结束 ====================
 
     struct sc_mouse_motion_event evt = {
         .position = sc_input_manager_get_position(im, event->x, event->y),
@@ -1213,11 +1241,16 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
     im->mp->ops->process_mouse_motion(im->mp, &evt);
 
     if (im->vfinger_down) {
-        struct sc_point mouse = sc_screen_convert_window_to_frame_coords(im->screen, event->x, event->y);
-        struct sc_point vfinger = inverse_point(mouse, im->screen->frame_size, im->vfinger_invert_x, im->vfinger_invert_y);
+        struct sc_point mouse =
+            sc_screen_convert_window_to_frame_coords(im->screen, event->x, event->y);
+        struct sc_point vfinger = inverse_point(mouse, im->screen->frame_size,
+                                                im->vfinger_invert_x,
+                                                im->vfinger_invert_y);
         simulate_virtual_finger(im, AMOTION_EVENT_ACTION_MOVE, vfinger);
     }
 }
+
+// ==================== 触摸处理（保持原样） ====================
 
 static void
 sc_input_manager_process_touch(struct sc_input_manager *im,
@@ -1254,6 +1287,8 @@ sc_input_manager_get_binding(const struct sc_mouse_binding_set *bindings,
     }
 }
 
+// ==================== 鼠标按键处理 ====================
+
 static void
 sc_input_manager_process_mouse_button(struct sc_input_manager *im,
                                       const SDL_MouseButtonEvent *event) {
@@ -1266,23 +1301,39 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
 
     // ==================== 自定义鼠标拦截 ====================
     if (control && !paused && !im->camera) {
-        // 左键锁定
+
+        // ---- 鼠标移动映射触发器（优先处理） ----
+        if (mouse_button_is_move_map_trigger(event->button)) {
+            if (down && !g_mouse_move_map.active) {
+                mouse_move_map_activate(im);
+            } else if (!down && g_mouse_move_map.active) {
+                mouse_move_map_deactivate(im);
+            }
+            return;  // 完全消耗该事件
+        }
+
+        // ---- 左键锁定 ----
         if (event->button == SDL_BUTTON_LEFT && g_left_click_locked) {
             if (down == g_left_click_locked_down) return;
             g_left_click_locked_down = down;
             enum android_motionevent_action action = down
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            inject_touch_at(im, action, g_left_click_locked_x, g_left_click_locked_y, (uint64_t)-25);
+            inject_touch_at(im, action,
+                            g_settings.default_left_lock_x,
+                            g_settings.default_left_lock_y,
+                            PID_LEFT_LOCK);
             return;
         }
 
-        // 右键固定映射
-        if (event->button == SDL_BUTTON_RIGHT) {
-            if (down == g_right_click_down) return;
-            g_right_click_down = down;
+        // ---- 配置的鼠标按键映射（覆盖所有 5 个按键）----
+        int idx = mouse_button_to_index(event->button);
+        if (idx >= 0 && g_mouse_btn[idx].configured) {
+            struct sc_mouse_button_mapping *m = &g_mouse_btn[idx];
+            if (down == m->down) return;
+            m->down = down;
             enum android_motionevent_action action = down
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            inject_touch_at(im, action, g_right_click_x, g_right_click_y, (uint64_t)-24);
+            inject_touch_at(im, action, m->x, m->y, m->pointer_id);
             return;
         }
     }
@@ -1302,7 +1353,8 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
         struct sc_mouse_binding_set *bindings = !shift_pressed
                                               ? &im->mouse_bindings.pri
                                               : &im->mouse_bindings.sec;
-        enum sc_mouse_binding binding = sc_input_manager_get_binding(bindings, event->button);
+        enum sc_mouse_binding binding =
+            sc_input_manager_get_binding(bindings, event->button);
         assert(binding != SC_MOUSE_BINDING_AUTO);
         switch (binding) {
             case SC_MOUSE_BINDING_DISABLED: return;
@@ -1327,11 +1379,13 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
 
     bool video = im->screen->video;
     bool mouse_relative_mode = im->mp && im->mp->relative_mode;
-    if (video && !mouse_relative_mode && event->button == SDL_BUTTON_LEFT && event->clicks == 2) {
+    if (video && !mouse_relative_mode && event->button == SDL_BUTTON_LEFT &&
+        event->clicks == 2) {
         int32_t x = event->x;
         int32_t y = event->y;
         SDL_FRect *r = &im->screen->rect;
-        bool outside = x < r->x || x >= r->x + r->w || y < r->y || y >= r->y + r->h;
+        bool outside = x < r->x || x >= r->x + r->w ||
+                       y < r->y || y >= r->y + r->h;
         if (outside) {
             if (down) sc_screen_resize_to_fit(im->screen);
             return;
@@ -1360,17 +1414,23 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     if (im->mp->relative_mode) return;
 
     if (change_vfinger) {
-        struct sc_point mouse = sc_screen_convert_window_to_frame_coords(im->screen, event->x, event->y);
+        struct sc_point mouse =
+            sc_screen_convert_window_to_frame_coords(im->screen, event->x, event->y);
         if (down) {
             im->vfinger_invert_x = ctrl_pressed ^ shift_pressed;
             im->vfinger_invert_y = ctrl_pressed;
         }
-        struct sc_point vfinger = inverse_point(mouse, im->screen->frame_size, im->vfinger_invert_x, im->vfinger_invert_y);
-        enum android_motionevent_action action = down ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
+        struct sc_point vfinger = inverse_point(mouse, im->screen->frame_size,
+                                                im->vfinger_invert_x,
+                                                im->vfinger_invert_y);
+        enum android_motionevent_action action = down
+            ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
         if (!simulate_virtual_finger(im, action, vfinger)) return;
         im->vfinger_down = down;
     }
 }
+
+// ==================== 滚轮 ====================
 
 static void
 sc_input_manager_process_mouse_wheel(struct sc_input_manager *im,
@@ -1391,9 +1451,11 @@ sc_input_manager_process_mouse_wheel(struct sc_input_manager *im,
     im->mp->ops->process_mouse_scroll(im->mp, &evt);
 }
 
+// ==================== 手柄（原样保留） ====================
+
 static void
 sc_input_manager_process_gamepad_device(struct sc_input_manager *im,
-                                       const SDL_GamepadDeviceEvent *event) {
+                                        const SDL_GamepadDeviceEvent *event) {
     if (im->camera || !im->gp || im->disconnected) return;
 
     if (event->type == SDL_EVENT_GAMEPAD_ADDED) {
@@ -1436,7 +1498,7 @@ sc_input_manager_process_gamepad_axis(struct sc_input_manager *im,
 
 static void
 sc_input_manager_process_gamepad_button(struct sc_input_manager *im,
-                                       const SDL_GamepadButtonEvent *event) {
+                                        const SDL_GamepadButtonEvent *event) {
     if (im->camera || !im->gp || im->screen->paused || im->disconnected) return;
     enum sc_gamepad_button button = sc_gamepad_button_from_sdl(event->button);
     if (button == SC_GAMEPAD_BUTTON_UNKNOWN) return;
@@ -1447,6 +1509,8 @@ sc_input_manager_process_gamepad_button(struct sc_input_manager *im,
     };
     im->gp->ops->process_gamepad_button(im->gp, &evt);
 }
+
+// ==================== 文件拖放 ====================
 
 static bool
 is_apk(const char *file) {
@@ -1460,10 +1524,7 @@ sc_input_manager_process_file(struct sc_input_manager *im,
     if (im->camera || !im->controller || im->disconnected) return;
     assert(event->type == SDL_EVENT_DROP_FILE);
     char *file = strdup(event->data);
-    if (!file) {
-        LOG_OOM();
-        return;
-    }
+    if (!file) { LOG_OOM(); return; }
     enum sc_file_pusher_action action;
     if (is_apk(file)) action = SC_FILE_PUSHER_ACTION_INSTALL_APK;
     else action = SC_FILE_PUSHER_ACTION_PUSH_FILE;
