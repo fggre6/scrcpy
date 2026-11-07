@@ -1,7 +1,9 @@
 # 映射模板 JSON 格式
 
 适用分支：`trae/agent-6FTCv4`
-代码基线：`836aa5c5`（任务三提交）；本文档随其后的任务四提交入库。
+撰写时分支 tip：`a9ed8b82`（本文档随后提交入库，最新 tip 以
+`git log -1 trae/agent-6FTCv4` 为准）。
+格式相关实现基线：`836aa5c5`（任务三提交，含全部字段读写代码）。
 对照实现：`app/src/mapping_manager.c` 的 `parse_template()`（加载）与
 `save_active_impl()`（保存），以及 `app/src/input_manager.c` 的注入逻辑。
 
