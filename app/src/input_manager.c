@@ -31,10 +31,16 @@ ov_of(struct sc_input_manager *im) {
 }
 
 // Send a touch at a normalized position (nx, ny in [0,1])
+// Positions are converted with the *current* frame_size on every injection,
+// so rotations / --max-size / --crop keep working (the server's PositionMapper
+// compares the sent screen size against the current video size).
 static bool
-inject_touch_norm(struct sc_input_manager *im,
-                  enum android_motionevent_action action,
-                  double nx, double ny, uint64_t pointer_id) {
+inject_touch_norm_once(struct sc_input_manager *im,
+                       enum android_motionevent_action action,
+                       double nx, double ny, int32_t pointer_id) {
+    if (!im->controller) {
+        return true; // teardown: nothing to inject
+    }
     struct sc_screen *screen = im->screen;
     int32_t x = (int32_t)(nx * screen->frame_size.width);
     int32_t y = (int32_t)(ny * screen->frame_size.height);
@@ -54,11 +60,34 @@ inject_touch_norm(struct sc_input_manager *im,
     msg.inject_touch_event.action_button = 0;
     msg.inject_touch_event.buttons = 0;
 
-    if (!sc_controller_push_msg(im->controller, &msg)) {
-        LOGW("Could not request 'inject custom touch event'");
-        return false;
+    return sc_controller_push_msg(im->controller, &msg);
+}
+
+// ACTION_DOWN / ACTION_UP must never be lost: the server allocates a pointer
+// slot per id and only frees it on UP, so a dropped UP leaks a slot forever
+// (MAX_POINTERS = 10, then every touch is refused). MOVE is droppable, DOWN and
+// UP are retried.
+static bool
+inject_touch_norm(struct sc_input_manager *im,
+                  enum android_motionevent_action action,
+                  double nx, double ny, int32_t pointer_id) {
+    bool critical = action == AMOTION_EVENT_ACTION_DOWN
+                 || action == AMOTION_EVENT_ACTION_UP;
+    int attempts = critical ? 3 : 1;
+    for (int i = 0; i < attempts; i++) {
+        if (inject_touch_norm_once(im, action, nx, ny, pointer_id)) {
+            return true;
+        }
+        if (i + 1 < attempts) {
+            SDL_Delay(5);
+        }
     }
-    return true;
+    if (critical) {
+        LOGE("Could not inject %s for pointer %d (3 attempts)",
+             action == AMOTION_EVENT_ACTION_UP ? "UP" : "DOWN",
+             (int) pointer_id);
+    }
+    return false;
 }
 
 // Inject a touch for a mapping entry (uses its normalized coords)
@@ -68,13 +97,37 @@ inject_entry(struct sc_input_manager *im, struct sc_mapping_entry *e,
     return inject_touch_norm(im, action, e->nx, e->ny, e->pointer_id);
 }
 
+// Lift every held entry (combos and single keys). Called before any state that
+// invalidates the entries (hot-reload, template switch, disable, destroy).
+static void
+mapping_release_all(void *userdata) {
+    struct sc_input_manager *im = userdata;
+    struct sc_mapping_manager *mm = mm_of(im);
+
+    for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+        struct sc_mapping_entry *e = &mm->entries[i];
+        if (!e->key_name) continue;
+        if (e->active) {
+            e->active = false;
+            inject_entry(im, e, AMOTION_EVENT_ACTION_UP);
+        }
+        if (e->down) {
+            e->down = false;
+            inject_entry(im, e, AMOTION_EVENT_ACTION_UP);
+        }
+    }
+    memset(im->g_pressed, 0, sizeof(im->g_pressed));
+    im->left_click_locked_down = false;
+    im->right_click_down = false;
+}
+
 // Update all combos based on currently pressed keys
 static void
 update_combos(struct sc_input_manager *im) {
     struct sc_mapping_manager *mm = mm_of(im);
-    for (int i = 0; i < mm->count; ++i) {
+    for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; ++i) {
         struct sc_mapping_entry *c = &mm->entries[i];
-        if (c->nkeys < 2) continue;
+        if (!c->key_name || c->nkeys < 2) continue;
 
         bool match = true;
         for (int j = 0; j < c->nkeys; ++j) {
@@ -151,15 +204,18 @@ toggle_design_mode(struct sc_input_manager *im) {
     struct sc_overlay *ov = ov_of(im);
     im->design_mode = !im->design_mode;
     if (im->design_mode) {
+        sc_mapping_manager_design_reset(mm_of(im));
         sc_overlay_set_design(ov, true,
-            "Design: click a position, then press a key to bind. F3 to save.");
+            "Design: click position, then press a key. F3 to exit.");
         LOGI("Design mode ON");
     } else {
-        // Save on exit
-        sc_mapping_manager_save_active(mm_of(im));
+        // Save only if something actually changed (dirty flag), never blindly
+        sc_mapping_manager_design_reset(mm_of(im));
+        if (sc_mapping_manager_save_active(mm_of(im))) {
+            sc_overlay_set_status(ov, "Design mode off");
+        }
         sc_overlay_set_design(ov, false, NULL);
-        sc_overlay_set_status(ov, "Template saved");
-        LOGI("Design mode OFF, template saved");
+        LOGI("Design mode OFF");
     }
 }
 
@@ -210,6 +266,18 @@ sc_input_manager_init(struct sc_input_manager *im,
 
     sc_overlay_init(&im->screen->overlay);
     sc_mapping_manager_init(&im->screen->mm);
+    // The manager must be able to lift held fingers before it mutates entries.
+    sc_mapping_manager_set_release_hook(&im->screen->mm, mapping_release_all, im);
+
+    char status[160];
+    snprintf(status, sizeof(status),
+             "Template '%s': %d entries, %d rejected",
+             im->screen->mm.active_name ? im->screen->mm.active_name : "-",
+             im->screen->mm.count, im->screen->mm.last_load.fail);
+    sc_overlay_set_status(&im->screen->overlay, status);
+    for (int i = 0; i < im->screen->mm.last_load.nmsgs; i++) {
+        LOGW("%s", im->screen->mm.last_load.msgs[i]);
+    }
 }
 
 // ==================== SCRCPY 原有按键动作 ====================
@@ -583,10 +651,9 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             const char *name = sc_mapping_key_name(sdl_keycode);
             if (sc_mapping_manager_design_bind(mm, name)) {
                 char buf[128];
-                snprintf(buf, sizeof(buf), "Bound %s -> (%.3f, %.3f)",
-                         name, mm->design_nx, mm->design_ny);
+                snprintf(buf, sizeof(buf), "Bound %s", name);
                 sc_overlay_set_status(ov, buf);
-            } else if (!mm->design_has_pending) {
+            } else if (!sc_mapping_manager_design_has_point(mm)) {
                 sc_overlay_set_status(ov,
                     "Click a position first, then press a key");
             }
@@ -621,9 +688,9 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             if (m) {
                 // 如果该键被已激活的 combo 覆盖，跳过单键逻辑
                 bool covered = false;
-                for (int i = 0; i < mm->count; ++i) {
+                for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; ++i) {
                     struct sc_mapping_entry *c = &mm->entries[i];
-                    if (!c->active) continue;
+                    if (!c->key_name || !c->active) continue;
                     for (int j = 0; j < c->nkeys; ++j) {
                         if (c->keys[j] == sdl_keycode) { covered = true; break; }
                     }
@@ -862,7 +929,7 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
     if (im->camera || !im->mp || im->screen->paused || im->disconnected) return;
     if (event->which == SDL_TOUCH_MOUSEID) return;
 
-    // If switch popup is open, update hover (and auto-switch on hover)
+    // If switch popup is open, update hover (and request a debounced switch)
     if (im->switch_open) {
         int hovered = sc_overlay_update_switch_mouse(ov_of(im),
                                                      (float)event->x,
@@ -870,8 +937,9 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
         if (hovered >= 0) {
             char **names = ov_of(im)->names;
             if (names && names[hovered]) {
-                sc_mapping_manager_switch(mm_of(im), names[hovered]);
-                sc_overlay_set_status(ov_of(im), names[hovered]);
+                // No file I/O here: the switch is applied later by the tick,
+                // after the hover has been stable for a short delay.
+                sc_mapping_manager_request_switch(mm_of(im), names[hovered]);
             }
         }
         return;
@@ -951,11 +1019,21 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
         if (nx > 1) nx = 1;
         if (ny < 0) ny = 0;
         if (ny > 1) ny = 1;
-        sc_mapping_manager_design_set_pending(mm, nx, ny);
-        char buf[128];
-        snprintf(buf, sizeof(buf),
-                 "Position recorded (%.3f, %.3f). Press a key to bind.",
-                 nx, ny);
+        sc_mapping_manager_design_click(mm, nx, ny);
+        char buf[160];
+        if (mm->design_is_slide && mm->design_stage == 1) {
+            snprintf(buf, sizeof(buf),
+                     "Slide start (%.3f, %.3f). Click the end point.",
+                     nx, ny);
+        } else if (mm->design_is_slide && mm->design_stage == 2) {
+            snprintf(buf, sizeof(buf),
+                     "Slide recorded (d=%.3f, %.3f, %dms). Press a key.",
+                     mm->design_dx, mm->design_dy, mm->design_duration_ms);
+        } else {
+            snprintf(buf, sizeof(buf),
+                     "Position recorded (%.3f, %.3f). Press a key to bind.",
+                     nx, ny);
+        }
         sc_overlay_set_status(ov_of(im), buf);
         sc_overlay_set_design(ov_of(im), true, buf);
         return;
@@ -975,8 +1053,12 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
             im->left_click_locked_down = down;
             enum android_motionevent_action action = down
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            struct sc_mapping_entry *e = mm->mouse_left_locked;
-            if (e) inject_entry(im, e, action);
+            // Index lookup, never a stored pointer (entries are a fixed table
+            // and are replaced on reload)
+            int idx = mm->mouse_left_locked_idx;
+            if (idx >= 0 && mm->entries[idx].key_name) {
+                inject_entry(im, &mm->entries[idx], action);
+            }
             return;
         }
 
@@ -986,8 +1068,10 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
             im->right_click_down = down;
             enum android_motionevent_action action = down
                 ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            struct sc_mapping_entry *e = mm->mouse_right;
-            if (e) inject_entry(im, e, action);
+            int idx = mm->mouse_right_idx;
+            if (idx >= 0 && mm->entries[idx].key_name) {
+                inject_entry(im, &mm->entries[idx], action);
+            }
             return;
         }
     }

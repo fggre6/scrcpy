@@ -2,8 +2,9 @@
   "shortcuts": {
     "switch_template": "F2",
     "design_mode": "F3",
-    "toggle_mapping": "F4"
+    "toggle_mapping": "F4",
+    "manager_panel": "F5"
   },
   "active_template": "default",
-  "enabled": true
+  "enabled": false
 }

@@ -854,6 +854,10 @@ sc_screen_destroy(struct sc_screen *screen) {
     if (screen->disconnect_started) {
         sc_disconnect_destroy(&screen->disconnect);
     }
+    // Lift held fingers and release mapping resources before tearing down
+    // (the controller is still alive at this point).
+    sc_mapping_manager_destroy(&screen->mm);
+    sc_overlay_destroy(&screen->overlay);
     sc_texture_destroy(&screen->tex);
     av_frame_free(&screen->frame);
 #ifdef SC_DISPLAY_FORCE_OPENGL_CORE_PROFILE
@@ -1180,6 +1184,9 @@ sc_disconnect_on_timeout(struct sc_disconnect *d, void *userdata) {
 
 void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
+    // Apply debounced template switches (no file I/O from mouse callbacks)
+    sc_mapping_manager_tick(&screen->mm);
+
     // Periodically check for external template/config changes (hot-reload)
     static sc_tick last_reload_check = 0;
     sc_tick now = sc_tick_now();
