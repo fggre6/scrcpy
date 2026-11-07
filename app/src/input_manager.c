@@ -408,7 +408,428 @@ toggle_design_mode(struct sc_input_manager *im) {
     }
 }
 
+// ==================== 内置管理面板（F5） ====================
+
+// The panel edits the live entry table through the same validation functions
+// used by the JSON loader (sc_mapping_manager_upsert /
+// sc_mapping_validate_key_expr), so the editor and the loader cannot disagree.
+
+static int
+entry_index_by_sel(struct sc_mapping_manager *mm, int sel) {
+    int n = 0;
+    for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+        if (!mm->entries[i].key_name) continue;
+        if (n == sel) return i;
+        n++;
+    }
+    return -1;
+}
+
+static struct sc_mapping_entry *
+manager_selected_entry(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    int idx = entry_index_by_sel(mm_of(im), ov->mgr_entry_sel);
+    return idx >= 0 ? &mm_of(im)->entries[idx] : NULL;
+}
+
+static void
+manager_refresh_templates(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+    int total = sc_mapping_manager_list(mm, NULL, 0);
+    char **names = NULL;
+    if (total > 0) {
+        names = calloc((size_t) total, sizeof(char *));
+        if (names) {
+            sc_mapping_manager_list(mm, names, total);
+        } else {
+            total = 0;
+        }
+    }
+    free(ov->mgr_names);
+    ov->mgr_names = names;
+    ov->mgr_count = names ? total : 0;
+    if (ov->mgr_tmpl_sel >= ov->mgr_count) {
+        ov->mgr_tmpl_sel = ov->mgr_count > 0 ? ov->mgr_count - 1 : 0;
+    }
+}
+
+static void
+manager_open(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+
+    // F3 and F5 are mutually exclusive
+    if (im->design_mode) {
+        im->design_mode = false;
+        sc_overlay_set_design(ov, false, NULL);
+    }
+    if (im->switch_open) {
+        close_template_switch(im);
+    }
+    // Entering the panel restores all input state (no finger left down)
+    mapping_release_all(im);
+
+    sc_overlay_set_manager(ov, true, mm, NULL, 0);
+    manager_refresh_templates(im);
+
+    ov->mgr_focus = 1;
+    ov->mgr_entry_sel = 0;
+    for (int i = 0; i < ov->mgr_count; i++) {
+        if (mm->active_name && ov->mgr_names[i]
+                && strcmp(mm->active_name, ov->mgr_names[i]) == 0) {
+            ov->mgr_tmpl_sel = i;
+            break;
+        }
+    }
+    sc_overlay_manager_set_hint(ov,
+        "1-5 edit field, Enter commit, N then key = new entry");
+    LOGI("Manager panel opened");
+}
+
+static void
+manager_close(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+
+    sc_overlay_set_manager(ov, false, NULL, NULL, 0);
+    // Restore every bit of input state the panel may have touched
+    mapping_release_all(im);
+    im->left_click_locked_down = false;
+    im->right_click_down = false;
+    // Dirty-gated: nothing is written when nothing was modified
+    sc_mapping_manager_save_active(mm);
+    LOGI("Manager panel closed");
+}
+
+static void
+manager_begin_edit(struct sc_input_manager *im, int field) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    if (field >= 2 && field <= 4 && e->type != SC_MAPPING_TYPE_SLIDE) {
+        sc_overlay_manager_set_hint(ov,
+            "dx/dy/duration need a slide entry (press T)");
+        return;
+    }
+    ov->mgr_edit_field = field;
+    ov->mgr_edit_len = 0;
+    ov->mgr_edit_buf[0] = '\0';
+    if (field == 0) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
+                             "%.5f", e->nx);
+    else if (field == 1) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
+                                  "%.5f", e->ny);
+    else if (field == 2) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
+                                  "%.5f", e->ndx);
+    else if (field == 3) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
+                                  "%.5f", e->ndy);
+    else if (field == 4) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
+                                  "%d", e->duration_ms);
+    ov->mgr_edit_len = (int) strlen(ov->mgr_edit_buf);
+}
+
+static void
+manager_commit_edit(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    int field = ov->mgr_edit_field;
+    ov->mgr_edit_field = -1;
+    if (!e || field < 0) return;
+
+    double v = atof(ov->mgr_edit_buf);
+    double nx = e->nx, ny = e->ny, ndx = e->ndx, ndy = e->ndy;
+    int dur = e->duration_ms;
+    if (field == 0) nx = v;
+    else if (field == 1) ny = v;
+    else if (field == 2) ndx = v;
+    else if (field == 3) ndy = v;
+    else if (field == 4) dur = (int) v;
+
+    char err[128];
+    if (!sc_mapping_manager_upsert(mm, e->key_name, e->type, nx, ny, ndx, ndy,
+                                   dur, err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        LOGW("Manager edit rejected: %s", err);
+    } else {
+        sc_overlay_manager_set_hint(ov, "Updated (not saved yet: press S)");
+    }
+}
+
+static void
+manager_create_entry(struct sc_input_manager *im, const char *key_name) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+
+    // Use the last picked point if any, else the frame center
+    double nx = 0.5, ny = 0.5;
+    if (sc_mapping_manager_design_has_point(mm)) {
+        nx = mm->design_nx;
+        ny = mm->design_ny;
+    }
+    char err[128];
+    if (!sc_mapping_manager_upsert(mm, key_name, SC_MAPPING_TYPE_TOUCH,
+                                   nx, ny, 0.0, 0.0, 0, err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        LOGW("Manager new entry rejected: %s", err);
+        return;
+    }
+    sc_mapping_manager_design_reset(mm);
+    manager_refresh_templates(im);
+    sc_overlay_manager_set_hint(ov, "Entry added (press S to save)");
+}
+
+static void
+manager_remove_selected(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    char name[64];
+    snprintf(name, sizeof(name), "%s", e->key_name);
+    if (sc_mapping_manager_remove_entry(mm_of(im), name)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Removed %s (press S to save)", name);
+        sc_overlay_manager_set_hint(ov, msg);
+        if (ov->mgr_entry_sel > 0) ov->mgr_entry_sel--;
+    }
+}
+
+static void
+manager_toggle_type(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    if (e->is_mouse) {
+        sc_overlay_manager_set_hint(ov, "Mouse entries cannot be slides");
+        return;
+    }
+    enum sc_mapping_entry_type new_type =
+        e->type == SC_MAPPING_TYPE_SLIDE ? SC_MAPPING_TYPE_TOUCH
+                                         : SC_MAPPING_TYPE_SLIDE;
+    double ndx = e->type == SC_MAPPING_TYPE_SLIDE ? e->ndx : 0.0;
+    double ndy = e->type == SC_MAPPING_TYPE_SLIDE ? e->ndy : -0.3;
+    int dur = e->type == SC_MAPPING_TYPE_SLIDE ? e->duration_ms : 200;
+
+    char err[128];
+    if (!sc_mapping_manager_upsert(mm_of(im), e->key_name, new_type,
+                                   e->nx, e->ny, ndx, ndy, dur,
+                                   err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        return;
+    }
+    sc_overlay_manager_set_hint(ov, new_type == SC_MAPPING_TYPE_SLIDE
+        ? "Now a slide (edit 3/4/5)" : "Now a touch entry");
+}
+
+static void
+manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    int mode = ov->mgr_pick;
+    ov->mgr_pick = 0;
+
+    if (!e) {
+        // No entry yet: remember the point for the next "N <key>" creation
+        mm_of(im)->design_nx = nx;
+        mm_of(im)->design_ny = ny;
+        mm_of(im)->design_stage = 1;
+        sc_overlay_manager_set_hint(ov, "Point stored: press N then a key");
+        return;
+    }
+
+    double x = e->nx, y = e->ny, dx = e->ndx, dy = e->ndy;
+    if (mode == 1) {
+        x = nx;
+        y = ny;
+    } else {
+        // end point of a slide, expressed as a delta from the start
+        dx = nx - e->nx;
+        dy = ny - e->ny;
+    }
+    char err[128];
+    if (!sc_mapping_manager_upsert(mm_of(im), e->key_name, e->type, x, y,
+                                   dx, dy, e->duration_ms, err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        return;
+    }
+    sc_overlay_manager_set_hint(ov, mode == 1 ? "Point updated"
+                                              : "Slide end point updated");
+}
+
+// Returns true when the key was consumed by the panel.
+static bool
+manager_handle_key(struct sc_input_manager *im, SDL_Keycode kc) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+
+    if (ov->mgr_capture_key) {
+        ov->mgr_capture_key = false;
+        if (kc == SDLK_ESCAPE) {
+            sc_overlay_manager_set_hint(ov, "Cancelled");
+        } else {
+            manager_create_entry(im, sc_mapping_key_name(kc));
+        }
+        return true;
+    }
+
+    if (ov->mgr_edit_field >= 0) {
+        if (kc == SDLK_ESCAPE) {
+            ov->mgr_edit_field = -1;
+            sc_overlay_manager_set_hint(ov, "Edit cancelled");
+        } else if (kc == SDLK_RETURN || kc == SDLK_KP_ENTER) {
+            manager_commit_edit(im);
+        } else if (kc == SDLK_BACKSPACE) {
+            if (ov->mgr_edit_len > 0) {
+                ov->mgr_edit_buf[--ov->mgr_edit_len] = '\0';
+            }
+        } else {
+            char ch = 0;
+            if (kc >= SDLK_0 && kc <= SDLK_9) {
+                ch = (char) ('0' + (kc - SDLK_0));
+            } else if (kc == SDLK_PERIOD || kc == SDLK_KP_PERIOD) {
+                ch = '.';
+            } else if (kc == SDLK_MINUS) {
+                ch = '-';
+            }
+            if (ch && ov->mgr_edit_len < (int) sizeof(ov->mgr_edit_buf) - 1) {
+                ov->mgr_edit_buf[ov->mgr_edit_len++] = ch;
+                ov->mgr_edit_buf[ov->mgr_edit_len] = '\0';
+            }
+        }
+        return true;
+    }
+
+    switch (kc) {
+    case SDLK_TAB:
+        ov->mgr_focus = ov->mgr_focus == 0 ? 1 : 0;
+        return true;
+    case SDLK_UP:
+        if (ov->mgr_focus == 0) {
+            if (ov->mgr_tmpl_sel > 0) ov->mgr_tmpl_sel--;
+        } else if (ov->mgr_entry_sel > 0) {
+            ov->mgr_entry_sel--;
+        }
+        return true;
+    case SDLK_DOWN:
+        if (ov->mgr_focus == 0) {
+            if (ov->mgr_tmpl_sel + 1 < ov->mgr_count) ov->mgr_tmpl_sel++;
+        } else if (ov->mgr_entry_sel + 1 < mm->count) {
+            ov->mgr_entry_sel++;
+        }
+        return true;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER: {
+        if (ov->mgr_focus == 0) {
+            if (ov->mgr_names && ov->mgr_tmpl_sel < ov->mgr_count) {
+                const char *n = ov->mgr_names[ov->mgr_tmpl_sel];
+                if (n && sc_mapping_manager_switch(mm, n)) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "Template: %s", n);
+                    sc_overlay_manager_set_hint(ov, msg);
+                    ov->mgr_entry_sel = 0;
+                } else {
+                    sc_overlay_manager_set_hint(ov, "Load failed");
+                }
+            }
+            return true;
+        }
+        manager_begin_edit(im, 0);
+        return true;
+    }
+    case SDLK_1: manager_begin_edit(im, 0); return true;
+    case SDLK_2: manager_begin_edit(im, 1); return true;
+    case SDLK_3: manager_begin_edit(im, 2); return true;
+    case SDLK_4: manager_begin_edit(im, 3); return true;
+    case SDLK_5: manager_begin_edit(im, 4); return true;
+    case SDLK_N:
+        ov->mgr_capture_key = true;
+        sc_overlay_manager_set_hint(ov, "Press the key to bind (Esc cancels)");
+        return true;
+    case SDLK_DELETE:
+    case SDLK_X:
+        manager_remove_selected(im);
+        return true;
+    case SDLK_T:
+        manager_toggle_type(im);
+        return true;
+    case SDLK_P:
+        ov->mgr_pick = 1;
+        sc_overlay_manager_set_hint(ov, "Click a point on the video");
+        return true;
+    case SDLK_O:
+        ov->mgr_pick = 2;
+        sc_overlay_manager_set_hint(ov, "Click the slide end point");
+        return true;
+    case SDLK_E: {
+        bool en = !mm->enabled;
+        sc_mapping_manager_set_enabled(mm, en);
+        sc_overlay_show_toggle(ov, en);
+        sc_overlay_manager_set_hint(ov, en ? "Mapping enabled"
+                                           : "Mapping disabled");
+        return true;
+    }
+    case SDLK_S:
+        if (sc_mapping_manager_save_active_force(mm)) {
+            sc_overlay_manager_set_hint(ov, "Saved");
+            sc_overlay_set_status(ov, "Template saved");
+        } else {
+            sc_overlay_manager_set_hint(ov, "Save failed");
+        }
+        return true;
+    default:
+        return true; // panel is modal: never forward keys while it is open
+    }
+}
+
+static void
+manager_handle_click(struct sc_input_manager *im, double win_x, double win_y) {
+    struct sc_overlay *ov = ov_of(im);
+    int win_w = 0, win_h = 0;
+    SDL_GetWindowSize(im->screen->window, &win_w, &win_h);
+
+    if (sc_overlay_manager_mouse(ov, (float) win_x, (float) win_y,
+                                 win_w, win_h)) {
+        return; // consumed by the panel
+    }
+
+    // Click on the video area: only used for coordinate picking
+    if (ov->mgr_pick) {
+        struct sc_point p = sc_screen_convert_window_to_frame_coords(
+            im->screen, (float) win_x, (float) win_y);
+        double nx = (double) p.x / im->screen->frame_size.width;
+        double ny = (double) p.y / im->screen->frame_size.height;
+        if (nx < 0) nx = 0;
+        if (nx > 1) nx = 1;
+        if (ny < 0) ny = 0;
+        if (ny > 1) ny = 1;
+        manager_pick_point(im, nx, ny);
+    }
+}
+
+
 // ==================== 初始化 ====================
+
+static bool
+overlay_manager_open(struct sc_input_manager *im) {
+    return ov_of(im)->mode == SC_OVERLAY_MANAGER;
+}
 
 void
 sc_input_manager_init(struct sc_input_manager *im,
@@ -744,6 +1165,7 @@ sc_input_manager_process_text_input(struct sc_input_manager *im,
         return;
     }
     if (!im->kp->ops->process_text) return;
+    if (overlay_manager_open(im)) return; // panel is modal: no text forwarding
 
     uint16_t mod = sc_sdl_mod_normalize(SDL_GetModState());
     if (sc_shortcut_mods_is_shortcut_mod(im->sdl_shortcut_mods, mod)) return;
@@ -801,8 +1223,29 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     struct sc_mapping_manager *mm = mm_of(im);
     struct sc_overlay *ov = ov_of(im);
 
+    // ---- 管理面板（F5）打开时：键盘归面板独占 ----
+    // F5 关闭；F3 关闭面板并切到设计模式（二者互斥）；其余按键交给面板，
+    // 一律不转发到设备。
+    if (overlay_manager_open(im)) {
+        if (down && !repeat) {
+            if (sdl_keycode == mm->sc_manager) {
+                manager_close(im);
+            } else if (sdl_keycode == mm->sc_design) {
+                manager_close(im);
+                toggle_design_mode(im);
+            } else {
+                manager_handle_key(im, sdl_keycode);
+            }
+        }
+        return;
+    }
+
     // ---- 全局快捷键（无论映射是否启用都响应） ----
     if (down && !repeat) {
+        if (sdl_keycode == mm->sc_manager) {
+            manager_open(im);
+            return;
+        }
         if (sdl_keycode == mm->sc_switch) {
             if (im->switch_open) close_template_switch(im);
             else open_template_switch(im);
@@ -1134,6 +1577,10 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
     if (im->camera || !im->mp || im->screen->paused || im->disconnected) return;
     if (event->which == SDL_TOUCH_MOUSEID) return;
 
+    // 管理面板打开时鼠标移动不转发到设备（面板本身由键盘驱动）；面板关闭后
+    // 转发行为与打开前完全一致。
+    if (overlay_manager_open(im)) return;
+
     // If switch popup is open, update hover (and request a debounced switch)
     if (im->switch_open) {
         int hovered = sc_overlay_update_switch_mouse(ov_of(im),
@@ -1172,6 +1619,7 @@ sc_input_manager_process_touch(struct sc_input_manager *im,
                                const SDL_TouchFingerEvent *event) {
     if (im->camera || !im->mp || im->screen->paused || im->disconnected) return;
     if (!im->mp->ops->process_touch) return;
+    if (overlay_manager_open(im)) return; // panel is modal: no touch forwarding
 
     struct sc_size window_size = sc_sdl_get_window_size(im->screen->window);
     int32_t x = event->x * (int32_t)window_size.width;
@@ -1211,6 +1659,15 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool control = im->controller;
     bool paused = im->screen->paused;
     bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
+
+    // 管理面板打开时鼠标归面板所有：左键用于列表选择 / 取点，其它键吞掉，
+    // 全部不转发到设备。关闭面板时 manager_close() 会复位按键与锁定状态。
+    if (overlay_manager_open(im)) {
+        if (down && event->button == SDL_BUTTON_LEFT) {
+            manager_handle_click(im, event->x, event->y);
+        }
+        return;
+    }
 
     struct sc_mapping_manager *mm = mm_of(im);
 
@@ -1384,6 +1841,7 @@ sc_input_manager_process_mouse_wheel(struct sc_input_manager *im,
                                      const SDL_MouseWheelEvent *event) {
     if (im->camera || !im->kp || im->screen->paused || im->disconnected) return;
     if (!im->mp->ops->process_mouse_scroll) return;
+    if (overlay_manager_open(im)) return; // panel is modal: no scrolling
 
     float mouse_x, mouse_y;
     uint32_t buttons = SDL_GetMouseState(&mouse_x, &mouse_y);

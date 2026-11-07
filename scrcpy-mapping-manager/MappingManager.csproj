@@ -1,5 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
+  <!--
+    旧版独立 WinForms 管理器源码。
+    不随发布分发：发布包只包含 scrcpy.exe 与内置 F5 管理面板，
+    CI 不再构建/打包本工程（避免依赖 .NET 8 运行时）。
+    保留仅供历史参考，功能已由 app/src/overlay_ui.c 的内置面板取代。
+  -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
