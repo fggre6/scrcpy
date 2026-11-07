@@ -531,6 +531,13 @@ parse_template(const char *path, struct sc_parse_out *out) {
         cJSON *item = cJSON_GetArrayItem(mappings, i);
         char err[128];
 
+        // Never write past the fixed entry table: every further entry is
+        // rejected and counted (and shown in the load statistics).
+        if (out->count >= SC_MAPPING_MAX_ENTRIES) {
+            stat_fail(&out->stats, path, i, "mapping table full");
+            continue;
+        }
+
         if (!cJSON_IsObject(item)) {
             stat_fail(&out->stats, path, i, "entry is not an object");
             continue;

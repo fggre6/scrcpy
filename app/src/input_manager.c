@@ -594,7 +594,7 @@ manager_remove_selected(struct sc_input_manager *im) {
         sc_overlay_manager_set_hint(ov, "No entry selected");
         return;
     }
-    char name[64];
+    char name[256]; // longest accepted combo is 4 x 63 chars + 3 '+'
     snprintf(name, sizeof(name), "%s", e->key_name);
     if (sc_mapping_manager_remove_entry(mm_of(im), name)) {
         char msg[128];
@@ -649,6 +649,11 @@ manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
         mm_of(im)->design_ny = ny;
         mm_of(im)->design_stage = 1;
         sc_overlay_manager_set_hint(ov, "Point stored: press N then a key");
+        return;
+    }
+
+    if (mode == 2 && e->type != SC_MAPPING_TYPE_SLIDE) {
+        sc_overlay_manager_set_hint(ov, "Press T first to make it a slide");
         return;
     }
 
