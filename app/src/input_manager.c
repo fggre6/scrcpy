@@ -374,6 +374,16 @@ open_template_switch(struct sc_input_manager *im) {
     if (!names) return;
     sc_mapping_manager_list(mm, names, total);
 
+    // F2 picker and F3 design mode are mutually exclusive: only one overlay may
+    // be live at a time.
+    if (im->design_mode) {
+        im->design_mode = false;
+        sc_mapping_manager_design_reset(mm);
+        sc_mapping_manager_save_active(mm); // dirty-gated
+        sc_overlay_set_design(ov, false, NULL);
+        LOGI("Design mode OFF (template picker opened)");
+    }
+
     sc_overlay_show_switch(ov, names, total);
     im->switch_open = true;
 }
@@ -393,6 +403,7 @@ toggle_design_mode(struct sc_input_manager *im) {
     struct sc_overlay *ov = ov_of(im);
     im->design_mode = !im->design_mode;
     if (im->design_mode) {
+        close_template_switch(im); // never two overlays at once
         sc_mapping_manager_design_reset(mm_of(im));
         sc_overlay_set_design(ov, true,
             "Design: click position, then press a key. F3 to exit.");
