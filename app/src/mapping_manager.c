@@ -493,6 +493,9 @@ parse_clamp_duration(int *duration_ms, const char *tmpl, int index) {
     }
 }
 
+static void
+cross_validate_slides(struct sc_parse_out *out, const char *path);
+
 static bool
 parse_template(const char *path, struct sc_parse_out *out) {
     memset(out, 0, sizeof(*out));
@@ -695,6 +698,8 @@ parse_template(const char *path, struct sc_parse_out *out) {
         LOGW("Template '%s': entry table full, extra entries ignored", path);
     }
 
+    cross_validate_slides(out, path);
+
     cJSON_Delete(root);
     return true;
 }
@@ -708,6 +713,43 @@ parse_out_free(struct sc_parse_out *out) {
     free(out->entries);
     out->entries = NULL;
     out->count = 0;
+}
+
+// A slide key must not also take part in a combo (the combo would press it as a
+// plain tap while the slide owns the same pointer id).
+static void
+cross_validate_slides(struct sc_parse_out *out, const char *path) {
+    for (int i = 0; i < out->count; i++) {
+        struct sc_mapping_entry *e = &out->entries[i];
+        if (!e->key_name || e->type != SC_MAPPING_TYPE_SLIDE) continue;
+        bool reject = false;
+        for (int j = 0; j < out->count && !reject; j++) {
+            struct sc_mapping_entry *c = &out->entries[j];
+            if (j == i || !c->key_name || c->nkeys < 2) continue;
+            for (int k = 0; k < c->nkeys; k++) {
+                if (c->keys[k] == e->keys[0]) {
+                    reject = true;
+                    break;
+                }
+            }
+        }
+        if (reject) {
+            char reason[128];
+            snprintf(reason, sizeof(reason),
+                     "slide key '%s' is also used in a combo", e->key_name);
+            stat_fail(&out->stats, path, i, reason);
+            free(e->key_name);
+            e->key_name = NULL;
+        }
+    }
+    // compact
+    int n = 0;
+    for (int i = 0; i < out->count; i++) {
+        if (!out->entries[i].key_name) continue;
+        if (n != i) out->entries[n] = out->entries[i];
+        n++;
+    }
+    out->count = n;
 }
 
 // Atomically replace the live entries by the parsed ones. The release hook is
@@ -1104,6 +1146,36 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
         duration_ms = SLIDE_DURATION_MIN_MS;
     } else if (duration_ms > SLIDE_DURATION_MAX_MS) {
         duration_ms = SLIDE_DURATION_MAX_MS;
+    }
+
+    // A slide key must not be used in a combo (and vice versa): the slide owns
+    // a pointer id, a combo press would tap with the same id.
+    if (!is_mouse) {
+        if (type == SC_MAPPING_TYPE_SLIDE) {
+            for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+                struct sc_mapping_entry *c = &mm->entries[i];
+                if (!c->key_name || c->nkeys < 2) continue;
+                for (int j = 0; j < c->nkeys; j++) {
+                    if (c->keys[j] == keys[0]) {
+                        ERR_MSG("key '%s' is already used in combo '%s'",
+                                key_name, c->key_name);
+                        return false;
+                    }
+                }
+            }
+        } else if (nkeys >= 2) {
+            for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+                struct sc_mapping_entry *s = &mm->entries[i];
+                if (!s->key_name || s->type != SC_MAPPING_TYPE_SLIDE) continue;
+                for (int j = 0; j < nkeys; j++) {
+                    if (s->keys[0] == keys[j]) {
+                        ERR_MSG("combo '%s' contains slide key '%s'",
+                                key_name, s->key_name);
+                        return false;
+                    }
+                }
+            }
+        }
     }
 
     struct sc_mapping_entry *e = find_by_name_impl(mm, key_name);

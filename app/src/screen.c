@@ -1186,6 +1186,8 @@ void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     // Apply debounced template switches (no file I/O from mouse callbacks)
     sc_mapping_manager_tick(&screen->mm);
+    // Advance running slides (main-loop driven, no detached thread)
+    sc_input_manager_tick(&screen->im);
 
     // Periodically check for external template/config changes (hot-reload)
     static sc_tick last_reload_check = 0;

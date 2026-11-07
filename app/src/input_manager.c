@@ -97,12 +97,200 @@ inject_entry(struct sc_input_manager *im, struct sc_mapping_entry *e,
     return inject_touch_norm(im, action, e->nx, e->ny, e->pointer_id);
 }
 
+// ==================== 滑动（hold-to-slide） ====================
+
+// Rate limits: a slide must not be able to flood the control queue, and a
+// 0-delay configuration is meaningless (4 ms is the floor).
+#define SLIDE_STEPS_DEFAULT 20
+#define SLIDE_STEPS_MIN 2
+#define SLIDE_STEPS_MAX 120
+#define SLIDE_STEP_MIN_MS 4
+#define SLIDE_DURATION_MIN_MS 50
+#define SLIDE_DURATION_MAX_MS 5000
+
+static void
+slide_stop_all(struct sc_input_manager *im);
+
+static bool
+slide_start(struct sc_input_manager *im, struct sc_mapping_entry *e);
+
+static void
+slide_stop_for_entry(struct sc_input_manager *im, struct sc_mapping_entry *e);
+
+static double
+clamp01(double v) {
+    if (v < 0.0) return 0.0;
+    if (v > 1.0) return 1.0;
+    return v;
+}
+
+static bool
+slide_start(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    int slot = -1;
+    for (int i = 0; i < SC_MAX_SLIDES; i++) {
+        if (!im->slides[i].active) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        LOGW("Too many concurrent slides (max %d), '%s' ignored",
+             SC_MAX_SLIDES, e->key_name);
+        return false;
+    }
+
+    int duration_ms = e->duration_ms > 0 ? e->duration_ms : 200;
+    if (duration_ms < SLIDE_DURATION_MIN_MS) {
+        LOGW("Slide '%s': duration_ms %d < %d, clamped", e->key_name,
+             duration_ms, SLIDE_DURATION_MIN_MS);
+        duration_ms = SLIDE_DURATION_MIN_MS;
+    } else if (duration_ms > SLIDE_DURATION_MAX_MS) {
+        LOGW("Slide '%s': duration_ms %d > %d, clamped", e->key_name,
+             duration_ms, SLIDE_DURATION_MAX_MS);
+        duration_ms = SLIDE_DURATION_MAX_MS;
+    }
+
+    int steps = SLIDE_STEPS_DEFAULT;
+    int step_ms = duration_ms / steps;
+    if (step_ms < SLIDE_STEP_MIN_MS) {
+        LOGW("Slide '%s': %d steps in %d ms needs <%d ms per step, "
+             "using %d ms", e->key_name, steps, duration_ms,
+             SLIDE_STEP_MIN_MS, SLIDE_STEP_MIN_MS);
+        step_ms = SLIDE_STEP_MIN_MS;
+        steps = duration_ms / step_ms;
+    }
+    if (steps < SLIDE_STEPS_MIN) steps = SLIDE_STEPS_MIN;
+    if (steps > SLIDE_STEPS_MAX) steps = SLIDE_STEPS_MAX;
+
+    struct sc_slide_run *r = &im->slides[slot];
+    // Value copy only: a later reload may replace the entry (and the whole
+    // entry table), the run must not reference it.
+    r->active = true;
+    r->pointer_id = e->pointer_id;
+    r->nx = e->nx;
+    r->ny = e->ny;
+    r->ndx = e->ndx;
+    r->ndy = e->ndy;
+    r->cur_nx = e->nx;
+    r->cur_ny = e->ny;
+    r->steps = steps;
+    r->step_ms = step_ms;
+    r->step = 0;
+    r->start = sc_tick_now();
+
+    if (!inject_touch_norm(im, AMOTION_EVENT_ACTION_DOWN, r->nx, r->ny,
+                           r->pointer_id)) {
+        r->active = false;
+        return false;
+    }
+    return true;
+}
+
+static void
+slide_stop(struct sc_input_manager *im, struct sc_slide_run *r) {
+    if (!r->active) return;
+    // The segment is closed with an UP at the current point. A single MOVE
+    // jumping back to the start would be seen by the device as a very fast
+    // stroke in the opposite direction (a "fling"), so the next segment is
+    // opened with a fresh DOWN at the start point instead.
+    if (!inject_touch_norm(im, AMOTION_EVENT_ACTION_UP, r->cur_nx, r->cur_ny,
+                           r->pointer_id)) {
+        LOGE("Slide UP could not be injected for pointer %d",
+             (int) r->pointer_id);
+    }
+    r->active = false;
+}
+
+static void
+slide_stop_for_entry(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    for (int i = 0; i < SC_MAX_SLIDES; i++) {
+        struct sc_slide_run *r = &im->slides[i];
+        if (r->active && r->pointer_id == e->pointer_id) {
+            slide_stop(im, r);
+        }
+    }
+}
+
+static void
+slide_stop_all(struct sc_input_manager *im) {
+    for (int i = 0; i < SC_MAX_SLIDES; i++) {
+        if (im->slides[i].active) {
+            slide_stop(im, &im->slides[i]);
+        }
+    }
+}
+
+// Advance running slides from the event loop. No thread is detached: the
+// progression is driven by sc_tick_now(), so there is nothing to join and
+// nothing can outlive the controller.
+void
+sc_input_manager_tick(struct sc_input_manager *im) {
+    bool any = false;
+    for (int i = 0; i < SC_MAX_SLIDES; i++) {
+        if (im->slides[i].active) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return; // cheap fast path: tick runs on every event
+
+    struct sc_mapping_manager *mm = mm_of(im);
+    // Any of these invalidates the slide: stop it and lift the finger.
+    bool blocked = im->screen->paused || im->disconnected || !im->controller
+                || !mm->enabled;
+
+    for (int i = 0; i < SC_MAX_SLIDES; i++) {
+        struct sc_slide_run *r = &im->slides[i];
+        if (!r->active) continue;
+        if (blocked) {
+            slide_stop(im, r);
+            continue;
+        }
+
+        sc_tick elapsed = sc_tick_now() - r->start;
+        int desired = (int) (elapsed / SC_TICK_FROM_MS(r->step_ms));
+        if (desired > r->steps) desired = r->steps;
+        if (desired <= r->step) continue;
+
+        // Only the newest position is sent (intermediate steps are skipped
+        // rather than queued), which keeps the control queue out of trouble.
+        double t = (double) desired / (double) r->steps;
+        r->cur_nx = clamp01(r->nx + r->ndx * t);
+        r->cur_ny = clamp01(r->ny + r->ndy * t);
+        r->step = desired;
+        inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, r->cur_nx, r->cur_ny,
+                          r->pointer_id);
+
+        if (desired >= r->steps) {
+            // Segment finished. Close it with UP at the end point and reopen
+            // at the start with a DOWN (holding the key keeps sliding).
+            slide_stop(im, r);
+
+            struct sc_mapping_entry *e = NULL;
+            for (int k = 0; k < SC_MAPPING_MAX_ENTRIES; k++) {
+                if (mm->entries[k].key_name && mm->entries[k].down
+                        && mm->entries[k].pointer_id == r->pointer_id) {
+                    e = &mm->entries[k];
+                    break;
+                }
+            }
+            if (e) {
+                slide_start(im, e);
+            }
+        }
+    }
+}
+
 // Lift every held entry (combos and single keys). Called before any state that
 // invalidates the entries (hot-reload, template switch, disable, destroy).
 static void
 mapping_release_all(void *userdata) {
     struct sc_input_manager *im = userdata;
     struct sc_mapping_manager *mm = mm_of(im);
+
+    // Running slides must be stopped (and their UP injected) before the
+    // entries they were derived from are replaced.
+    slide_stop_all(im);
 
     for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
         struct sc_mapping_entry *e = &mm->entries[i];
@@ -159,7 +347,8 @@ update_combos(struct sc_input_manager *im) {
                 if (!im->g_pressed[c->keys[j] & 0xFF]) continue;
                 struct sc_mapping_entry *m =
                     sc_mapping_manager_find_single(mm, c->keys[j]);
-                if (m && !m->down) {
+                // Slides are never combo members (rejected at load time)
+                if (m && !m->down && m->type != SC_MAPPING_TYPE_SLIDE) {
                     inject_entry(im, m, AMOTION_EVENT_ACTION_DOWN);
                     m->down = true;
                 }
@@ -699,13 +888,29 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                 if (!covered) {
                     if (down && m->down) return;
                     if (!down && !m->down) return;
-                    enum android_motionevent_action action = down
-                        ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-                    inject_entry(im, m, action);
-                    m->down = down;
+                    if (m->type == SC_MAPPING_TYPE_SLIDE) {
+                        // hold-to-slide: press starts the slide, release stops
+                        if (down) {
+                            m->down = true;
+                            slide_start(im, m);
+                        } else {
+                            m->down = false;
+                            slide_stop_for_entry(im, m);
+                        }
+                    } else {
+                        enum android_motionevent_action action = down
+                            ? AMOTION_EVENT_ACTION_DOWN
+                            : AMOTION_EVENT_ACTION_UP;
+                        inject_entry(im, m, action);
+                        m->down = down;
+                    }
                 } else if (!down && m->down) {
                     m->down = false;
-                    inject_entry(im, m, AMOTION_EVENT_ACTION_UP);
+                    if (m->type == SC_MAPPING_TYPE_SLIDE) {
+                        slide_stop_for_entry(im, m);
+                    } else {
+                        inject_entry(im, m, AMOTION_EVENT_ACTION_UP);
+                    }
                 }
             }
             return;
@@ -1009,6 +1214,20 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
 
     struct sc_mapping_manager *mm = mm_of(im);
 
+    // 设计模式：右键切换记录类型（单点 / 滑动两点）
+    if (im->design_mode && event->button == SDL_BUTTON_RIGHT && down) {
+        mm->design_is_slide = !mm->design_is_slide;
+        sc_mapping_manager_design_reset(mm);
+        const char *hint = mm->design_is_slide
+            ? "Design SLIDE: click twice (start / end), then a key. "
+              "Right click = touch mode. F3 = exit."
+            : "Design TOUCH: click a position, then a key. "
+              "Right click = slide mode. F3 = exit.";
+        sc_overlay_set_design(ov_of(im), true, hint);
+        sc_overlay_set_status(ov_of(im), hint);
+        return;
+    }
+
     // 设计模式：左键点击记录位置
     if (im->design_mode && event->button == SDL_BUTTON_LEFT && down) {
         struct sc_point p = sc_screen_convert_window_to_frame_coords(
@@ -1308,6 +1527,10 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
             break;
         case SC_EVENT_DEVICE_DISCONNECTED:
             sc_input_manager_on_device_disconnected(im);
+            break;
+        case SDL_EVENT_WINDOW_FOCUS_LOST:
+            // Losing focus must stop every slide (the key up will never arrive)
+            slide_stop_all(im);
             break;
     }
 }

@@ -15,6 +15,25 @@
 #include "trait/key_processor.h"
 #include "trait/mouse_processor.h"
 
+#include "util/tick.h"
+
+// Concurrent hold-to-slide instances (each holds its own pointer id)
+#define SC_MAX_SLIDES 4
+
+// A running slide. It stores *values* only (never an entry pointer), so a
+// hot-reload that replaces the entry table cannot dangle underneath it.
+struct sc_slide_run {
+    bool active;
+    int32_t pointer_id;
+    double nx, ny;   // start point (normalized)
+    double ndx, ndy; // delta (normalized, may be negative)
+    double cur_nx, cur_ny; // last injected position
+    int steps;
+    int step_ms;
+    int step;        // last emitted step index
+    sc_tick start;   // start of the current segment
+};
+
 struct sc_input_manager {
     struct sc_controller *controller;
     struct sc_file_pusher *fp;
@@ -58,6 +77,9 @@ struct sc_input_manager {
     bool design_mode;
     // Switch popup open
     bool switch_open;
+
+    // Running slides (advanced from the event loop, no thread detached)
+    struct sc_slide_run slides[SC_MAX_SLIDES];
 };
 
 struct sc_input_manager_params {
@@ -82,5 +104,10 @@ sc_input_manager_init(struct sc_input_manager *im,
 void
 sc_input_manager_handle_event(struct sc_input_manager *im,
                               const SDL_Event *event);
+
+// Advance running slides. Called from the event loop (no thread is detached);
+// also stops them when paused/disconnected/disabled.
+void
+sc_input_manager_tick(struct sc_input_manager *im);
 
 #endif
