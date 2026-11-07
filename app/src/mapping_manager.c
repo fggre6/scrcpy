@@ -274,7 +274,8 @@ parse_key_expr(const char *name, SDL_Keycode *out, int *nkeys_out,
         if (*p == '+') nmem++;
     }
     if (nmem > SC_MAPPING_MAX_KEYS) {
-        ERR_MSG("too many combo members (%d > %d)", nmem, SC_MAPPING_MAX_KEYS);
+        ERR_MSG("too many combo members (%d > %d) in '%s'", nmem,
+                SC_MAPPING_MAX_KEYS, name);
         return false;
     }
 

@@ -88,7 +88,7 @@
 - 成员数：**2..4**（`SC_MAPPING_MAX_KEYS = 4`）。
 - 不含 `+` 的表达式是**单键**（`nkeys = 1`），不是组合键。
 - 拒绝规则（整条拒绝，计入失败统计）：
-  - `+` 总数 > 3（即成员 > 4）：`too many combo members (N > 4)`；
+  - `+` 总数 > 3（即成员 > 4）：`too many combo members (N > 4) in '<原文>'`；
   - 空成员（`a+`、`+a`、`a++b`）或纯空白成员：`empty combo member`；
   - 单个成员长度 ≥ 64 字节：`combo member too long`；
   - 成员键名无法解析：`unknown key '...' in '...'`；
