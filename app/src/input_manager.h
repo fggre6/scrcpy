@@ -34,6 +34,19 @@ struct sc_slide_run {
     sc_tick start;   // start of the current segment
 };
 
+// A running mouse-motion swipe. Like the slide run it keeps value copies only.
+// The pointer id is the motion entry's own id, so it never fights a slide or a
+// key entry for the same server-side pointer slot.
+struct sc_motion_run {
+    bool active;
+    int32_t pointer_id;
+    double anchor_nx, anchor_ny; // re-anchor point after a boundary wrap
+    double cur_nx, cur_ny;       // last injected position
+    double sensitivity;
+    double pend_nx, pend_ny;     // deltas not yet injected (rate limiting)
+    sc_tick last_inject;
+};
+
 struct sc_input_manager {
     struct sc_controller *controller;
     struct sc_file_pusher *fp;
@@ -72,7 +85,11 @@ struct sc_input_manager {
     bool g_pressed[256];       // index = SDL keycode & 0xFF
     bool left_click_locked;
     bool left_click_locked_down;
-    bool right_click_down;
+    // Mouse buttons tracked independently of forwarding/consumption, so a
+    // button bound in a template is still visible as a mapping trigger and as
+    // a dependency source. Index = SDL button number (1..5).
+    bool map_mouse_down[6];
+
     // Design mode
     bool design_mode;
     // Switch popup open
@@ -80,6 +97,9 @@ struct sc_input_manager {
 
     // Running slides (advanced from the event loop, no thread detached)
     struct sc_slide_run slides[SC_MAX_SLIDES];
+
+    // Running mouse-motion swipe (at most one per template)
+    struct sc_motion_run motion;
 };
 
 struct sc_input_manager_params {

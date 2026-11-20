@@ -124,6 +124,7 @@ sc_overlay_set_manager(struct sc_overlay *ov, bool open,
         ov->mgr_edit_field = -1;
         ov->mgr_edit_len = 0;
         ov->mgr_capture_key = false;
+        ov->mgr_capture_dep = false;
         ov->mgr_pick = 0;
     } else {
         free_names(ov->mgr_names, ov->mgr_count);
@@ -131,6 +132,7 @@ sc_overlay_set_manager(struct sc_overlay *ov, bool open,
         ov->mgr_count = 0;
         ov->mgr_edit_field = -1;
         ov->mgr_capture_key = false;
+        ov->mgr_capture_dep = false;
         ov->mgr_pick = 0;
         if (ov->mode == SC_OVERLAY_MANAGER) {
             ov->mode = SC_OVERLAY_NONE;
@@ -279,8 +281,12 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
                        ov->mgr_focus == 1 ? 60 : 40,
                        ov->mgr_focus == 1 ? 120 : 90, 220, 200);
         }
-        snprintf(line, sizeof(line), "%s %-12s %s", e->type == SC_MAPPING_TYPE_SLIDE
-                 ? "S" : "T", e->key_name, e->is_mouse ? "(mouse)" : "");
+        const char *tag = e->type == SC_MAPPING_TYPE_SLIDE ? "S"
+                        : e->type == SC_MAPPING_TYPE_MOTION ? "M" : "T";
+        snprintf(line, sizeof(line), "%s %-12s %s%s%s", tag, e->key_name,
+                 e->mode == SC_MAPPING_MODE_TOGGLE ? "(tog)" : "",
+                 e->dep != SC_MAPPING_DEP_NONE ? "(dep)" : "",
+                 e->is_mouse ? "(mouse)" : "");
         draw_text(renderer, ex, y, line, 220, 220, 220);
     }
 
@@ -295,23 +301,43 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
         y += MGR_ROW_H * 1.4f;
 
         snprintf(line, sizeof(line), "type: %s",
-                 e->type == SC_MAPPING_TYPE_SLIDE ? "slide" : "touch");
+                 e->type == SC_MAPPING_TYPE_SLIDE ? "slide"
+                 : e->type == SC_MAPPING_TYPE_MOTION ? "motion" : "touch");
         draw_text(renderer, dx0, y, line, 200, 200, 255);
         y += MGR_ROW_H * 1.4f;
 
+        snprintf(line, sizeof(line), "mode: %s",
+                 e->mode == SC_MAPPING_MODE_TOGGLE ? "toggle" : "momentary");
+        draw_text(renderer, dx0, y, line, 200, 255, 200);
+        y += MGR_ROW_H * 1.4f;
+
+        if (e->dep != SC_MAPPING_DEP_NONE) {
+            snprintf(line, sizeof(line), "depend: %s %s",
+                     sc_mapping_key_name(e->dep_key),
+                     e->dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
+        } else {
+            snprintf(line, sizeof(line), "depend: none");
+        }
+        draw_text(renderer, dx0, y, line, 200, 220, 255);
+        y += MGR_ROW_H * 1.4f;
+
         // editable fields: [1]x [2]y (slide: [3]dx [4]dy [5]duration)
-        const char *labels[5] = { "1] x", "2] y", "3] dx", "4] dy", "5] duration" };
-        char values[5][32];
+        //                  (motion: [6]sensitivity)
+        const char *labels[6] = { "1] x", "2] y", "3] dx", "4] dy",
+                                  "5] duration", "6] sens" };
+        char values[6][32];
         snprintf(values[0], sizeof(values[0]), "%.5f", e->nx);
         snprintf(values[1], sizeof(values[1]), "%.5f", e->ny);
         snprintf(values[2], sizeof(values[2]), "%.5f", e->ndx);
         snprintf(values[3], sizeof(values[3]), "%.5f", e->ndy);
         snprintf(values[4], sizeof(values[4]), "%d", e->duration_ms);
-        bool show[5] = { true, true,
+        snprintf(values[5], sizeof(values[5]), "%.2f", e->sensitivity);
+        bool show[6] = { true, true,
                          e->type == SC_MAPPING_TYPE_SLIDE,
                          e->type == SC_MAPPING_TYPE_SLIDE,
-                         e->type == SC_MAPPING_TYPE_SLIDE };
-        for (int k = 0; k < 5; k++) {
+                         e->type == SC_MAPPING_TYPE_SLIDE,
+                         e->type == SC_MAPPING_TYPE_MOTION };
+        for (int k = 0; k < 6; k++) {
             if (!show[k]) continue;
             snprintf(line, sizeof(line), "%-12s : %s", labels[k], values[k]);
             bool editing = (ov->mgr_edit_field == k);
@@ -337,13 +363,14 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
     draw_panel(renderer, 0, fy, (float) pw, (float) MGR_FOOTER_H,
                20, 20, 26, 235);
     const char *keys =
-        "Tab focus  Up/Down select  N new  Del remove  T type  "
-        "P pick point  O pick end  E enable  S save";
+        "Tab focus  Up/Down select  N new  Del remove  T type  M mode  "
+        "D depend  V motion  P pick  O end  E enable  S save";
     draw_text(renderer, 8, fy + 4, keys, 170, 190, 220);
     const char *hint = ov->mgr_hint[0] ? ov->mgr_hint : "";
     draw_text(renderer, 8, fy + 18,
-              ov->mgr_capture_key ? "Press the key to bind (Esc cancels)"
-                                  : hint, 255, 220, 150);
+              ov->mgr_capture_dep ? "Press the dependency key (Esc cancels)"
+              : ov->mgr_capture_key ? "Press the key to bind (Esc cancels)"
+                                    : hint, 255, 220, 150);
 
     // mode marker on the video area
     snprintf(line, sizeof(line), "MODE: MANAGER (F5)");

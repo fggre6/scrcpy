@@ -18,7 +18,7 @@ enum sc_overlay_mode {
     SC_OVERLAY_MANAGER = 3,         // F5: built-in editor
 };
 
-#define SC_MANAGER_EDIT_FIELDS 5 // x, y, dx, dy, duration_ms
+#define SC_MANAGER_EDIT_FIELDS 6 // x, y, dx, dy, duration_ms, sensitivity
 
 struct sc_overlay {
     enum sc_overlay_mode mode;
@@ -43,6 +43,7 @@ struct sc_overlay {
     char mgr_edit_buf[24];
     int mgr_edit_len;
     bool mgr_capture_key; // next key press becomes the new entry's key
+    bool mgr_capture_dep; // next key press becomes the dependency key
     int mgr_pick;         // 0 = none, 1 = pick start, 2 = pick end point
     char mgr_hint[256];
 

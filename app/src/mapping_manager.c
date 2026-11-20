@@ -23,16 +23,52 @@
 #define SLIDE_DURATION_MIN_MS 50
 #define SLIDE_DURATION_MAX_MS 5000
 
-// Reserved mouse entry names ("keys" without a keycode)
-static bool
-is_mouse_right(const char *name);
-
+// Reserved mouse entry name ("key" without a keycode). Mouse *buttons* are
+// ordinary synthetic keycodes now; only the left-button lock is special.
 static bool
 is_mouse_left_locked(const char *name);
 
 static bool
 is_mouse_name(const char *name) {
-    return is_mouse_right(name) || is_mouse_left_locked(name);
+    return is_mouse_left_locked(name);
+}
+
+// Mouse motion is not a key press: it is a reserved entry name driven by the
+// mouse motion events while a button is held.
+static bool
+is_motion_name(const char *name) {
+    return SDL_strcasecmp(name, "MOUSE_MOVE") == 0;
+}
+
+// Map a mouse button name to its SDL button number (1 = left ... 5 = X2).
+static bool
+parse_mouse_button_name(const char *name, int *button) {
+    if (SDL_strcasecmp(name, "MOUSE_LEFT") == 0
+            || SDL_strcasecmp(name, "LEFT_CLICK") == 0) {
+        *button = 1;
+        return true;
+    }
+    if (SDL_strcasecmp(name, "MOUSE_MIDDLE") == 0
+            || SDL_strcasecmp(name, "MIDDLE_CLICK") == 0) {
+        *button = 2;
+        return true;
+    }
+    if (SDL_strcasecmp(name, "MOUSE_RIGHT") == 0
+            || SDL_strcasecmp(name, "RIGHT_CLICK") == 0) {
+        *button = 3;
+        return true;
+    }
+    if (SDL_strcasecmp(name, "MOUSE_X1") == 0
+            || SDL_strcasecmp(name, "MOUSE_BUTTON4") == 0) {
+        *button = 4;
+        return true;
+    }
+    if (SDL_strcasecmp(name, "MOUSE_X2") == 0
+            || SDL_strcasecmp(name, "MOUSE_BUTTON5") == 0) {
+        *button = 5;
+        return true;
+    }
+    return false;
 }
 
 // ============================================================
@@ -220,6 +256,14 @@ sc_mapping_parse_key_name(const char *name) {
     if (SDL_strcasecmp(start, "tab") == 0) return SDLK_TAB;
     if (SDL_strcasecmp(start, "backspace") == 0) return SDLK_BACKSPACE;
 
+    // Mouse buttons as mappable "keys" (synthetic keycodes, see the header).
+    // MOUSE_LEFT_LOCKED is a special entry, not a key, and is deliberately not
+    // handled here.
+    int button = 0;
+    if (parse_mouse_button_name(start, &button)) {
+        return SC_MAPPING_MOUSE_KEY(button);
+    }
+
     if (strlen(start) == 1) {
         char c = (char) toupper((unsigned char) start[0]);
         if (c >= 'A' && c <= 'Z') return SDLK_A + (c - 'A');
@@ -242,7 +286,22 @@ sc_mapping_parse_key_name(const char *name) {
 }
 
 const char *
+sc_mapping_mouse_key_name(SDL_Keycode kc) {
+    if (!SC_MAPPING_KEYCODE_IS_MOUSE(kc)) return NULL;
+    switch (SC_MAPPING_KEYCODE_MOUSE_BUTTON(kc)) {
+        case 1: return "MOUSE_LEFT";
+        case 2: return "MOUSE_MIDDLE";
+        case 3: return "MOUSE_RIGHT";
+        case 4: return "MOUSE_X1";
+        case 5: return "MOUSE_X2";
+        default: return NULL;
+    }
+}
+
+const char *
 sc_mapping_key_name(SDL_Keycode kc) {
+    const char *mouse = sc_mapping_mouse_key_name(kc);
+    if (mouse) return mouse;
     const char *n = SDL_GetKeyName(kc);
     if (n && *n) return n;
     return "Unknown";
@@ -322,6 +381,13 @@ parse_key_expr(const char *name, SDL_Keycode *out, int *nkeys_out,
             ERR_MSG("unknown key '%s' in '%s'", ts, name);
             return false;
         }
+        // Mouse buttons have no keyboard press state, so they cannot take part
+        // in a combo: a combo requires every member to be held at once.
+        if (SC_MAPPING_KEYCODE_IS_MOUSE(kc)) {
+            ERR_MSG("mouse button '%s' cannot be a combo member in '%s'", ts,
+                    name);
+            return false;
+        }
         for (int i = 0; i < n; i++) {
             if (out[i] == kc) {
                 ERR_MSG("duplicate combo member '%s' in '%s'", ts, name);
@@ -343,8 +409,9 @@ parse_key_expr(const char *name, SDL_Keycode *out, int *nkeys_out,
 
 bool
 sc_mapping_validate_key_expr(const char *name, char *err, size_t errlen) {
-    // Reserved mouse names are valid "keys" (they carry no keycode).
-    if (is_mouse_name(name)) {
+    // Reserved names: the left-button lock entry and the motion entry carry no
+    // keycode (type consistency is checked by the callers).
+    if (is_mouse_name(name) || is_motion_name(name)) {
         return true;
     }
     SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
@@ -355,12 +422,6 @@ sc_mapping_validate_key_expr(const char *name, char *err, size_t errlen) {
 // ============================================================
 // Special mouse names
 // ============================================================
-
-static bool
-is_mouse_right(const char *name) {
-    return name && (SDL_strcasecmp(name, "MOUSE_RIGHT") == 0
-                 || SDL_strcasecmp(name, "RIGHT_CLICK") == 0);
-}
 
 static bool
 is_mouse_left_locked(const char *name) {
@@ -422,9 +483,7 @@ refresh_mouse_indices(struct sc_mapping_manager *mm) {
     mm->mouse_left_locked_idx = -1;
     for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
         if (!mm->entries[i].key_name) continue;
-        if (is_mouse_right(mm->entries[i].key_name)) {
-            mm->mouse_right_idx = i;
-        } else if (is_mouse_left_locked(mm->entries[i].key_name)) {
+        if (is_mouse_left_locked(mm->entries[i].key_name)) {
             mm->mouse_left_locked_idx = i;
         }
     }
@@ -565,21 +624,6 @@ parse_template(const char *path, struct sc_parse_out *out) {
             continue;
         }
 
-        cJSON *jx = cJSON_GetObjectItemCaseSensitive(item, "x");
-        cJSON *jy = cJSON_GetObjectItemCaseSensitive(item, "y");
-        if (!cJSON_IsNumber(jx) || !cJSON_IsNumber(jy)) {
-            stat_fail(&out->stats, path, i, "missing or invalid 'x'/'y'");
-            continue;
-        }
-        double nx = jx->valuedouble;
-        double ny = jy->valuedouble;
-        if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) {
-            snprintf(err, sizeof(err), "'x'/'y' out of range [0,1] (%f, %f)",
-                     nx, ny);
-            stat_fail(&out->stats, path, i, err);
-            continue;
-        }
-
         // type (optional, defaults to "touch")
         enum sc_mapping_entry_type type = SC_MAPPING_TYPE_TOUCH;
         cJSON *jt = cJSON_GetObjectItemCaseSensitive(item, "type");
@@ -592,6 +636,8 @@ parse_template(const char *path, struct sc_parse_out *out) {
                 type = SC_MAPPING_TYPE_TOUCH;
             } else if (SDL_strcasecmp(jt->valuestring, "slide") == 0) {
                 type = SC_MAPPING_TYPE_SLIDE;
+            } else if (SDL_strcasecmp(jt->valuestring, "motion") == 0) {
+                type = SC_MAPPING_TYPE_MOTION;
             } else {
                 snprintf(err, sizeof(err), "unknown type '%s'",
                          jt->valuestring);
@@ -600,11 +646,159 @@ parse_template(const char *path, struct sc_parse_out *out) {
             }
         }
 
-        // mouse reserved names
-        if (is_mouse_name(key_name)) {
-            if (type == SC_MAPPING_TYPE_SLIDE) {
+        // "MOUSE_MOVE" is the only key that can carry the motion type, and the
+        // motion type is the only one that accepts it.
+        bool motion_name = is_motion_name(key_name);
+        if (type == SC_MAPPING_TYPE_MOTION && !motion_name) {
+            stat_fail(&out->stats, path, i,
+                      "type 'motion' requires key 'MOUSE_MOVE'");
+            continue;
+        }
+        if (motion_name && type != SC_MAPPING_TYPE_MOTION) {
+            stat_fail(&out->stats, path, i,
+                      "'MOUSE_MOVE' requires type 'motion'");
+            continue;
+        }
+
+        // x/y: required for touch and slide. For motion they are optional and
+        // only define the re-anchor point (default: screen center).
+        cJSON *jx = cJSON_GetObjectItemCaseSensitive(item, "x");
+        cJSON *jy = cJSON_GetObjectItemCaseSensitive(item, "y");
+        double nx = 0.5;
+        double ny = 0.5;
+        if (cJSON_IsNumber(jx) && cJSON_IsNumber(jy)) {
+            nx = jx->valuedouble;
+            ny = jy->valuedouble;
+            if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) {
                 snprintf(err, sizeof(err),
-                         "'%s' cannot be a slide", key_name);
+                         "'x'/'y' out of range [0,1] (%f, %f)", nx, ny);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+        } else if (jx || jy) {
+            // One of them present but not both numeric: never guess.
+            stat_fail(&out->stats, path, i,
+                      "'x'/'y' must both be numbers");
+            continue;
+        } else if (type != SC_MAPPING_TYPE_MOTION) {
+            stat_fail(&out->stats, path, i, "missing or invalid 'x'/'y'");
+            continue;
+        }
+
+        // mode (optional, defaults to "momentary")
+        enum sc_mapping_mode mode = SC_MAPPING_MODE_MOMENTARY;
+        cJSON *jmode = cJSON_GetObjectItemCaseSensitive(item, "mode");
+        if (jmode && !cJSON_IsString(jmode)) {
+            stat_fail(&out->stats, path, i, "'mode' must be a string");
+            continue;
+        }
+        if (cJSON_IsString(jmode)) {
+            if (SDL_strcasecmp(jmode->valuestring, "momentary") == 0) {
+                mode = SC_MAPPING_MODE_MOMENTARY;
+            } else if (SDL_strcasecmp(jmode->valuestring, "toggle") == 0) {
+                mode = SC_MAPPING_MODE_TOGGLE;
+            } else {
+                snprintf(err, sizeof(err), "unknown mode '%s'",
+                         jmode->valuestring);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+        }
+
+        // dependency (optional): "depends_on" is a single key / mouse button,
+        // "depends_state" is "pressed" (default) or "released".
+        enum sc_mapping_dep dep = SC_MAPPING_DEP_NONE;
+        SDL_Keycode dep_key = 0;
+        cJSON *jdep = cJSON_GetObjectItemCaseSensitive(item, "depends_on");
+        cJSON *jdepstate = cJSON_GetObjectItemCaseSensitive(item,
+                                                           "depends_state");
+        if (jdep) {
+            if (!cJSON_IsString(jdep) || !jdep->valuestring
+                    || !*jdep->valuestring) {
+                stat_fail(&out->stats, path, i,
+                          "missing or invalid 'depends_on'");
+                continue;
+            }
+            if (strchr(jdep->valuestring, '+')) {
+                stat_fail(&out->stats, path, i,
+                          "dependency must be a single key, not a combo");
+                continue;
+            }
+            dep_key = sc_mapping_parse_key_name(jdep->valuestring);
+            if (dep_key == SDLK_UNKNOWN) {
+                snprintf(err, sizeof(err), "unknown dependency key '%s'",
+                         jdep->valuestring);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+            dep = SC_MAPPING_DEP_PRESSED;
+            if (jdepstate) {
+                if (!cJSON_IsString(jdepstate)) {
+                    stat_fail(&out->stats, path, i,
+                              "'depends_state' must be a string");
+                    continue;
+                }
+                if (SDL_strcasecmp(jdepstate->valuestring, "pressed") == 0) {
+                    dep = SC_MAPPING_DEP_PRESSED;
+                } else if (SDL_strcasecmp(jdepstate->valuestring,
+                                          "released") == 0) {
+                    dep = SC_MAPPING_DEP_RELEASED;
+                } else {
+                    snprintf(err, sizeof(err), "unknown depends_state '%s'",
+                             jdepstate->valuestring);
+                    stat_fail(&out->stats, path, i, err);
+                    continue;
+                }
+            }
+        } else if (jdepstate) {
+            stat_fail(&out->stats, path, i,
+                      "'depends_state' requires 'depends_on'");
+            continue;
+        }
+
+        // sensitivity (optional, motion only)
+        double sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
+        cJSON *jsens = cJSON_GetObjectItemCaseSensitive(item, "sensitivity");
+        if (jsens) {
+            if (!cJSON_IsNumber(jsens)) {
+                stat_fail(&out->stats, path, i,
+                          "'sensitivity' must be a number");
+                continue;
+            }
+            if (type != SC_MAPPING_TYPE_MOTION) {
+                stat_fail(&out->stats, path, i,
+                          "'sensitivity' is only valid for type 'motion'");
+                continue;
+            }
+            sensitivity = jsens->valuedouble;
+            if (sensitivity < SC_MAPPING_SENSITIVITY_MIN) {
+                LOGW("Template '%s' entry %d: sensitivity %f < %f, clamped",
+                     path, i, sensitivity, SC_MAPPING_SENSITIVITY_MIN);
+                sensitivity = SC_MAPPING_SENSITIVITY_MIN;
+            } else if (sensitivity > SC_MAPPING_SENSITIVITY_MAX) {
+                LOGW("Template '%s' entry %d: sensitivity %f > %f, clamped",
+                     path, i, sensitivity, SC_MAPPING_SENSITIVITY_MAX);
+                sensitivity = SC_MAPPING_SENSITIVITY_MAX;
+            }
+        }
+
+        // Mouse reserved names (the left-button lock is a special entry)
+        if (is_mouse_name(key_name)) {
+            if (type != SC_MAPPING_TYPE_TOUCH) {
+                snprintf(err, sizeof(err), "'%s' cannot be a %s", key_name,
+                         type == SC_MAPPING_TYPE_SLIDE ? "slide" : "motion");
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+            if (mode != SC_MAPPING_MODE_MOMENTARY) {
+                snprintf(err, sizeof(err),
+                         "'%s' cannot use 'mode: toggle'", key_name);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+            if (dep != SC_MAPPING_DEP_NONE) {
+                snprintf(err, sizeof(err),
+                         "'%s' cannot use 'depends_on'", key_name);
                 stat_fail(&out->stats, path, i, err);
                 continue;
             }
@@ -620,6 +814,32 @@ parse_template(const char *path, struct sc_parse_out *out) {
             e->nx = nx;
             e->ny = ny;
             e->duration_ms = 0;
+            e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
+            out->count++;
+            out->stats.ok++;
+            continue;
+        }
+
+        // Mouse motion entry: no keycode, driven by mouse motion events.
+        if (type == SC_MAPPING_TYPE_MOTION) {
+            if (mode != SC_MAPPING_MODE_MOMENTARY) {
+                stat_fail(&out->stats, path, i,
+                          "'mode: toggle' is not supported for motion");
+                continue;
+            }
+            struct sc_mapping_entry *e = &out->entries[out->count];
+            e->key_name = strdup(key_name);
+            if (!e->key_name) {
+                stat_fail(&out->stats, path, i, "out of memory");
+                continue;
+            }
+            e->nkeys = 0;
+            e->type = SC_MAPPING_TYPE_MOTION;
+            e->nx = nx;
+            e->ny = ny;
+            e->sensitivity = sensitivity;
+            e->dep = dep;
+            e->dep_key = dep_key;
             out->count++;
             out->stats.ok++;
             continue;
@@ -628,6 +848,31 @@ parse_template(const char *path, struct sc_parse_out *out) {
         SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
         int nkeys = 0;
         if (!parse_key_expr(key_name, keys, &nkeys, err, sizeof(err))) {
+            stat_fail(&out->stats, path, i, err);
+            continue;
+        }
+
+        // A toggle flips on every press edge, which is only well defined for a
+        // single trigger: reject it on combos instead of guessing.
+        if (mode == SC_MAPPING_MODE_TOGGLE && nkeys != 1) {
+            snprintf(err, sizeof(err),
+                     "'mode: toggle' requires a single key, not a combo ('%s')",
+                     key_name);
+            stat_fail(&out->stats, path, i, err);
+            continue;
+        }
+        // Toggle is only meaningful for momentary touch presses; a slide has
+        // its own press/release cycle. Reject instead of silently dropping the
+        // field on the next save.
+        if (mode == SC_MAPPING_MODE_TOGGLE && type == SC_MAPPING_TYPE_SLIDE) {
+            snprintf(err, sizeof(err),
+                     "'mode: toggle' is not supported for slides ('%s')",
+                     key_name);
+            stat_fail(&out->stats, path, i, err);
+            continue;
+        }
+        if (dep != SC_MAPPING_DEP_NONE && nkeys == 1 && dep_key == keys[0]) {
+            snprintf(err, sizeof(err), "'%s' depends on itself", key_name);
             stat_fail(&out->stats, path, i, err);
             continue;
         }
@@ -681,6 +926,9 @@ parse_template(const char *path, struct sc_parse_out *out) {
             e->ndx = ndx;
             e->ndy = ndy;
             e->duration_ms = duration_ms;
+            e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
+            e->dep = dep;
+            e->dep_key = dep_key;
             out->count++;
             out->stats.ok++;
             continue;
@@ -695,9 +943,13 @@ parse_template(const char *path, struct sc_parse_out *out) {
         memcpy(e->keys, keys, sizeof(keys));
         e->nkeys = nkeys;
         e->type = SC_MAPPING_TYPE_TOUCH;
+        e->mode = mode;
         e->nx = nx;
         e->ny = ny;
         e->duration_ms = 0;
+        e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
+        e->dep = dep;
+        e->dep_key = dep_key;
         out->count++;
         out->stats.ok++;
     }
@@ -810,6 +1062,22 @@ save_active_impl(struct sc_mapping_manager *mm, bool force) {
             cJSON_AddNumberToObject(item, "dx", e->ndx);
             cJSON_AddNumberToObject(item, "dy", e->ndy);
             cJSON_AddNumberToObject(item, "duration_ms", e->duration_ms);
+        } else if (e->type == SC_MAPPING_TYPE_MOTION) {
+            cJSON_AddStringToObject(item, "type", "motion");
+            cJSON_AddNumberToObject(item, "sensitivity", e->sensitivity);
+        }
+        // Optional state fields are written only when they differ from the
+        // defaults, so an untouched template keeps its original shape
+        // (load -> save -> load stays idempotent either way).
+        if (e->mode == SC_MAPPING_MODE_TOGGLE) {
+            cJSON_AddStringToObject(item, "mode", "toggle");
+        }
+        if (e->dep != SC_MAPPING_DEP_NONE) {
+            cJSON_AddStringToObject(item, "depends_on",
+                                    sc_mapping_key_name(e->dep_key));
+            cJSON_AddStringToObject(item, "depends_state",
+                                    e->dep == SC_MAPPING_DEP_RELEASED
+                                        ? "released" : "pressed");
         }
         cJSON_AddItemToArray(arr, item);
     }
@@ -1120,25 +1388,92 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
                           enum sc_mapping_entry_type type, double nx, double ny,
                           double ndx, double ndy, int duration_ms,
                           char *err, size_t errlen) {
+    return sc_mapping_manager_upsert_ex(mm, key_name, type, nx, ny, ndx, ndy,
+                                        duration_ms, SC_MAPPING_MODE_MOMENTARY,
+                                        NULL, SC_MAPPING_DEP_NONE,
+                                        SC_MAPPING_SENSITIVITY_DEFAULT,
+                                        err, errlen);
+}
+
+bool
+sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name,
+                             enum sc_mapping_entry_type type, double nx,
+                             double ny, double ndx, double ndy, int duration_ms,
+                             enum sc_mapping_mode mode,
+                             const char *dep_name, enum sc_mapping_dep dep,
+                             double sensitivity, char *err, size_t errlen) {
     if (!key_name || !*key_name) {
         ERR_MSG("empty key name");
+        return false;
+    }
+
+    bool is_mouse = is_mouse_name(key_name);
+    bool is_motion = is_motion_name(key_name);
+
+    // Type / key consistency (same rules as the JSON loader).
+    if (is_motion && type != SC_MAPPING_TYPE_MOTION) {
+        ERR_MSG("'MOUSE_MOVE' requires type 'motion'");
+        return false;
+    }
+    if (type == SC_MAPPING_TYPE_MOTION && !is_motion) {
+        ERR_MSG("type 'motion' requires key 'MOUSE_MOVE'");
+        return false;
+    }
+    if (is_mouse && type != SC_MAPPING_TYPE_TOUCH) {
+        ERR_MSG("mouse lock entries cannot be slides or motion");
+        return false;
+    }
+    if (mode == SC_MAPPING_MODE_TOGGLE && type != SC_MAPPING_TYPE_TOUCH) {
+        ERR_MSG("'mode: toggle' is only supported for touch entries");
+        return false;
+    }
+    if (mode == SC_MAPPING_MODE_TOGGLE && is_mouse) {
+        ERR_MSG("'mode: toggle' is not supported for this entry");
         return false;
     }
     if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) {
         ERR_MSG("'x'/'y' out of range [0,1]");
         return false;
     }
+    if (is_mouse && dep != SC_MAPPING_DEP_NONE) {
+        ERR_MSG("mouse lock entries cannot use a dependency");
+        return false;
+    }
 
-    bool is_mouse = is_mouse_name(key_name);
     SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
     int nkeys = 0;
-    if (!is_mouse && !parse_key_expr(key_name, keys, &nkeys, err, errlen)) {
+    if (!is_mouse && !is_motion
+            && !parse_key_expr(key_name, keys, &nkeys, err, errlen)) {
         return false;
     }
-    if (is_mouse && type == SC_MAPPING_TYPE_SLIDE) {
-        ERR_MSG("mouse entries cannot be slides");
+    if (mode == SC_MAPPING_MODE_TOGGLE && nkeys != 1) {
+        ERR_MSG("'mode: toggle' requires a single key");
         return false;
     }
+
+    // Dependency: a single key (mouse buttons allowed), never the entry's own
+    // single trigger key.
+    SDL_Keycode dep_key = 0;
+    if (dep != SC_MAPPING_DEP_NONE) {
+        if (!dep_name || !*dep_name) {
+            ERR_MSG("empty dependency key");
+            return false;
+        }
+        if (strchr(dep_name, '+')) {
+            ERR_MSG("dependency must be a single key, not a combo");
+            return false;
+        }
+        dep_key = sc_mapping_parse_key_name(dep_name);
+        if (dep_key == SDLK_UNKNOWN) {
+            ERR_MSG("unknown dependency key '%s'", dep_name);
+            return false;
+        }
+        if (nkeys == 1 && dep_key == keys[0]) {
+            ERR_MSG("'%s' depends on itself", key_name);
+            return false;
+        }
+    }
+
     if (type == SC_MAPPING_TYPE_SLIDE) {
         if (nkeys != 1) {
             ERR_MSG("slide key must be a single key");
@@ -1155,10 +1490,15 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
     } else if (duration_ms > SLIDE_DURATION_MAX_MS) {
         duration_ms = SLIDE_DURATION_MAX_MS;
     }
+    if (sensitivity < SC_MAPPING_SENSITIVITY_MIN) {
+        sensitivity = SC_MAPPING_SENSITIVITY_MIN;
+    } else if (sensitivity > SC_MAPPING_SENSITIVITY_MAX) {
+        sensitivity = SC_MAPPING_SENSITIVITY_MAX;
+    }
 
     // A slide key must not be used in a combo (and vice versa): the slide owns
     // a pointer id, a combo press would tap with the same id.
-    if (!is_mouse) {
+    if (!is_mouse && !is_motion) {
         if (type == SC_MAPPING_TYPE_SLIDE) {
             for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
                 struct sc_mapping_entry *c = &mm->entries[i];
@@ -1203,23 +1543,46 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
         strcpy(e->key_name, key_name);
         e->pointer_id = acquire_pid(mm);
         mm->count++;
+    } else if (e->active || e->down) {
+        // Editing a live entry must not leave a finger pressed with the old
+        // coordinates: lift everything first (the hook also stops slides).
+        if (mm->release_hook) {
+            mm->release_hook(mm->release_opaque);
+        }
     }
 
     memcpy(e->keys, keys, sizeof(keys));
-    e->nkeys = is_mouse ? 0 : nkeys;
+    e->nkeys = (is_mouse || is_motion) ? 0 : nkeys;
     e->is_mouse = is_mouse;
-    e->type = is_mouse ? SC_MAPPING_TYPE_TOUCH : type;
+    e->type = type;
+    e->mode = (is_mouse || is_motion) ? SC_MAPPING_MODE_MOMENTARY : mode;
     e->nx = nx;
     e->ny = ny;
     e->ndx = (type == SC_MAPPING_TYPE_SLIDE) ? ndx : 0.0;
     e->ndy = (type == SC_MAPPING_TYPE_SLIDE) ? ndy : 0.0;
     e->duration_ms = e->type == SC_MAPPING_TYPE_SLIDE ? duration_ms : 0;
+    e->sensitivity = e->type == SC_MAPPING_TYPE_MOTION ? sensitivity
+                                                       : SC_MAPPING_SENSITIVITY_DEFAULT;
+    e->dep = is_mouse ? SC_MAPPING_DEP_NONE : dep;
+    e->dep_key = dep_key;
     e->down = false;
     e->active = false;
 
     refresh_mouse_indices(mm);
     mm->dirty = true;
     return true;
+}
+
+bool
+sc_mapping_manager_key_is_dependency(struct sc_mapping_manager *mm,
+                                     SDL_Keycode kc) {
+    for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+        struct sc_mapping_entry *e = &mm->entries[i];
+        if (e->key_name && e->dep != SC_MAPPING_DEP_NONE && e->dep_key == kc) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool
@@ -1300,9 +1663,23 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
                  ? mm->design_duration_ms : SLIDE_DURATION_DEFAULT_MS;
     }
 
-    bool ok = sc_mapping_manager_upsert(mm, key_name, type,
-                                        mm->design_nx, mm->design_ny,
-                                        ndx, ndy, duration, err, sizeof(err));
+    // Re-binding an existing key must not silently reset its optional fields
+    // (mode / dependency / sensitivity): keep them, only the geometry changes.
+    struct sc_mapping_entry *old = find_by_name_impl(mm, key_name);
+    enum sc_mapping_mode mode = old ? old->mode : SC_MAPPING_MODE_MOMENTARY;
+    enum sc_mapping_dep dep = old ? old->dep : SC_MAPPING_DEP_NONE;
+    SDL_Keycode dep_key = old ? old->dep_key : 0;
+    double sensitivity = old ? old->sensitivity : SC_MAPPING_SENSITIVITY_DEFAULT;
+    if (type == SC_MAPPING_TYPE_SLIDE) {
+        mode = SC_MAPPING_MODE_MOMENTARY; // toggle is not valid for slides
+    }
+
+    bool ok = sc_mapping_manager_upsert_ex(mm, key_name, type,
+                                           mm->design_nx, mm->design_ny,
+                                           ndx, ndy, duration, mode,
+                                           dep == SC_MAPPING_DEP_NONE ? NULL
+                                               : sc_mapping_key_name(dep_key),
+                                           dep, sensitivity, err, sizeof(err));
     if (ok) {
         sc_mapping_manager_design_reset(mm);
     } else {

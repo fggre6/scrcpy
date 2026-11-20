@@ -22,7 +22,37 @@
 enum sc_mapping_entry_type {
     SC_MAPPING_TYPE_TOUCH = 0,   // tap: press at (nx, ny)
     SC_MAPPING_TYPE_SLIDE = 1,   // hold-to-slide: from (nx, ny) by (ndx, ndy)
+    SC_MAPPING_TYPE_MOTION = 2,  // mouse motion -> continuous swipe (MOUSE_MOVE)
 };
+
+// How a mapping reacts to its trigger key/button.
+enum sc_mapping_mode {
+    SC_MAPPING_MODE_MOMENTARY = 0, // press = down, release = up (default)
+    SC_MAPPING_MODE_TOGGLE = 1,    // each press flips the injected state
+};
+
+// Dependency condition: the mapping only exists while `dep_key` is in the
+// requested state.
+enum sc_mapping_dep {
+    SC_MAPPING_DEP_NONE = 0,
+    SC_MAPPING_DEP_PRESSED = 1,  // depends_on must be held
+    SC_MAPPING_DEP_RELEASED = 2, // depends_on must be released
+};
+
+// Mouse buttons are expressed as synthetic keycodes: real SDL keycodes are
+// never negative, so these can neither collide with nor be produced by a
+// keyboard event. Button numbers follow SDL (1 = left ... 5 = X2).
+#define SC_MAPPING_MOUSE_KEY_BASE (-1000)
+#define SC_MAPPING_MOUSE_KEY(button) (SC_MAPPING_MOUSE_KEY_BASE - (button))
+#define SC_MAPPING_KEYCODE_IS_MOUSE(kc) \
+    ((kc) <= SC_MAPPING_MOUSE_KEY(1) && (kc) >= SC_MAPPING_MOUSE_KEY(5))
+#define SC_MAPPING_KEYCODE_MOUSE_BUTTON(kc) \
+    (SC_MAPPING_MOUSE_KEY_BASE - (int) (kc))
+
+// Mouse-motion sensitivity defaults / accepted range (also documented).
+#define SC_MAPPING_SENSITIVITY_DEFAULT 1.0
+#define SC_MAPPING_SENSITIVITY_MIN 0.05
+#define SC_MAPPING_SENSITIVITY_MAX 20.0
 
 // Result of the latest template load, exposed for logging and for the overlay.
 struct sc_mapping_load_stats {
@@ -39,15 +69,19 @@ struct sc_mapping_entry {
     SDL_Keycode keys[SC_MAPPING_MAX_KEYS]; // parsed keycodes (empty for mouse)
     int nkeys;                             // 0 = special mouse entry
     enum sc_mapping_entry_type type;
+    enum sc_mapping_mode mode;             // momentary (default) or toggle
     double nx;
     double ny;
     double ndx;        // slide only
     double ndy;        // slide only
     int duration_ms;   // slide only
+    double sensitivity; // motion only
+    SDL_Keycode dep_key;       // dependency key (valid when dep != NONE)
+    enum sc_mapping_dep dep;   // dependency condition
     int32_t pointer_id; // unique pointer id, 0 while unassigned
-    bool down;         // single-key pressed state
-    bool active;       // combo active state
-    bool is_mouse;     // MOUSE_RIGHT / MOUSE_LEFT_LOCKED entry
+    bool down;         // trigger held (momentary) / logical state (toggle)
+    bool active;       // injected press currently outstanding
+    bool is_mouse;     // MOUSE_LEFT_LOCKED entry
 };
 
 struct sc_file_stamp {
@@ -61,7 +95,7 @@ struct sc_mapping_manager {
     struct sc_mapping_entry entries[SC_MAPPING_MAX_ENTRIES];
     int count; // number of occupied slots
 
-    int mouse_right_idx;       // -1 if the template has no such entry
+    int mouse_right_idx;       // unused (MOUSE_RIGHT is a regular keycode now)
     int mouse_left_locked_idx; // -1 if the template has no such entry
 
     // Global state
@@ -176,6 +210,26 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
                           enum sc_mapping_entry_type type, double nx, double ny,
                           double ndx, double ndy, int duration_ms,
                           char *err, size_t errlen);
+
+// Full variant: also sets mode, dependency and motion sensitivity. All the
+// extra parameters are optional (NULL / NONE / 0 keep the defaults).
+bool
+sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name,
+                             enum sc_mapping_entry_type type, double nx,
+                             double ny, double ndx, double ndy, int duration_ms,
+                             enum sc_mapping_mode mode,
+                             const char *dep_name, enum sc_mapping_dep dep,
+                             double sensitivity, char *err, size_t errlen);
+
+// True when some entry depends on this key (its state must be tracked even if
+// the key itself is not mapped).
+bool
+sc_mapping_manager_key_is_dependency(struct sc_mapping_manager *mm,
+                                     SDL_Keycode kc);
+
+// Canonical name of a synthetic mouse-button keycode (NULL if not one).
+const char *
+sc_mapping_mouse_key_name(SDL_Keycode kc);
 
 bool
 sc_mapping_manager_remove_entry(struct sc_mapping_manager *mm,

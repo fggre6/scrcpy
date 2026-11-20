@@ -111,6 +111,12 @@ inject_entry(struct sc_input_manager *im, struct sc_mapping_entry *e,
 static void
 slide_stop_all(struct sc_input_manager *im);
 
+static void
+motion_stop(struct sc_input_manager *im);
+
+static bool
+dep_ok(struct sc_input_manager *im, struct sc_mapping_entry *e);
+
 static bool
 slide_start(struct sc_input_manager *im, struct sc_mapping_entry *e);
 
@@ -225,6 +231,16 @@ slide_stop_all(struct sc_input_manager *im) {
 // nothing can outlive the controller.
 void
 sc_input_manager_tick(struct sc_input_manager *im) {
+    struct sc_mapping_manager *mm = mm_of(im);
+    bool blocked = im->screen->paused || im->disconnected || !im->controller
+                || !mm->enabled;
+
+    // Motion is not time driven, but it must be lifted as soon as the mapping
+    // becomes invalid (pause, disconnect, disable, teardown).
+    if (im->motion.active && blocked) {
+        motion_stop(im);
+    }
+
     bool any = false;
     for (int i = 0; i < SC_MAX_SLIDES; i++) {
         if (im->slides[i].active) {
@@ -233,11 +249,6 @@ sc_input_manager_tick(struct sc_input_manager *im) {
         }
     }
     if (!any) return; // cheap fast path: tick runs on every event
-
-    struct sc_mapping_manager *mm = mm_of(im);
-    // Any of these invalidates the slide: stop it and lift the finger.
-    bool blocked = im->screen->paused || im->disconnected || !im->controller
-                || !mm->enabled;
 
     for (int i = 0; i < SC_MAX_SLIDES; i++) {
         struct sc_slide_run *r = &im->slides[i];
@@ -281,6 +292,235 @@ sc_input_manager_tick(struct sc_input_manager *im) {
     }
 }
 
+// ==================== 鼠标位移映射（motion） ====================
+
+// A MOVE is droppable and the control queue holds 60 messages, so motion is
+// throttled instead of flooding: at most one injected MOVE every 8 ms. Deltas
+// received in between are accumulated and applied on the next injection, so
+// the total displacement still matches the mouse movement.
+#define MOTION_MIN_INTERVAL_MS 8
+
+static struct sc_mapping_entry *
+find_motion_entry(struct sc_mapping_manager *mm) {
+    for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+        if (mm->entries[i].key_name
+                && mm->entries[i].type == SC_MAPPING_TYPE_MOTION) {
+            return &mm->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static bool
+motion_any_button_down(struct sc_input_manager *im) {
+    for (int b = 1; b <= 5; b++) {
+        if (im->map_mouse_down[b]) return true;
+    }
+    return false;
+}
+
+static void
+motion_stop(struct sc_input_manager *im) {
+    if (!im->motion.active) return;
+    // Close the swipe with an UP at the last injected point. There is no
+    // teleport back to the anchor: a single MOVE across the screen would be
+    // read as a fast stroke in the opposite direction.
+    inject_touch_norm(im, AMOTION_EVENT_ACTION_UP, im->motion.cur_nx,
+                      im->motion.cur_ny, im->motion.pointer_id);
+    im->motion.active = false;
+    struct sc_mapping_entry *e = find_motion_entry(mm_of(im));
+    if (e && e->pointer_id == im->motion.pointer_id) {
+        e->active = false;
+        e->down = false;
+    }
+}
+
+static void
+motion_start(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    struct sc_motion_run *r = &im->motion;
+    r->active = true;
+    r->pointer_id = e->pointer_id;
+    r->anchor_nx = e->nx;
+    r->anchor_ny = e->ny;
+    r->cur_nx = e->nx;
+    r->cur_ny = e->ny;
+    r->sensitivity = e->sensitivity > 0.0
+        ? e->sensitivity : SC_MAPPING_SENSITIVITY_DEFAULT;
+    r->pend_nx = 0.0;
+    r->pend_ny = 0.0;
+    r->last_inject = sc_tick_now();
+    e->active = true;
+    e->down = true;
+    if (!inject_touch_norm(im, AMOTION_EVENT_ACTION_DOWN, r->cur_nx, r->cur_ny,
+                           r->pointer_id)) {
+        r->active = false;
+        e->active = false;
+        e->down = false;
+    }
+}
+
+// Convert the mouse delta of one event into a normalized swipe move.
+// Returns true when the event was consumed by the motion mapping: either it is
+// actively driving the swipe, or a motion entry exists while a mouse button is
+// held (in that case the physical pointer must not be forwarded at the same
+// time, otherwise two pointers move the device cursor at once).
+static bool
+motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
+    struct sc_mapping_manager *mm = mm_of(im);
+    struct sc_mapping_entry *e = find_motion_entry(mm);
+    bool engaged = e && mm->enabled && im->controller
+                && !im->screen->paused && !im->disconnected
+                && !im->design_mode && !im->switch_open
+                && motion_any_button_down(im);
+    if (!engaged || !dep_ok(im, e)) {
+        motion_stop(im);
+        return false;
+    }
+
+    // Read the *current* frame size: rotation, --max-size and --crop all
+    // change it at runtime and the server drops MOVEs sized with a stale one.
+    int fw = im->screen->frame_size.width;
+    int fh = im->screen->frame_size.height;
+    if (fw <= 0 || fh <= 0) return true;
+
+    if (!im->motion.active) {
+        motion_start(im, e);
+        if (!im->motion.active) return true;
+    }
+
+    im->motion.pend_nx += (double) xrel * im->motion.sensitivity / (double) fw;
+    im->motion.pend_ny += (double) yrel * im->motion.sensitivity / (double) fh;
+    if (sc_tick_now() - im->motion.last_inject
+            < SC_TICK_FROM_MS(MOTION_MIN_INTERVAL_MS)) {
+        return true; // keep accumulating, the next event injects the sum
+    }
+    double dnx = im->motion.pend_nx;
+    double dny = im->motion.pend_ny;
+    im->motion.pend_nx = 0.0;
+    im->motion.pend_ny = 0.0;
+    im->motion.last_inject = sc_tick_now();
+
+    double tx = im->motion.cur_nx + dnx;
+    double ty = im->motion.cur_ny + dny;
+    if (tx < 0.0 || tx > 1.0 || ty < 0.0 || ty > 1.0) {
+        // Boundary: clamp the injected point, then wrap by closing the stroke
+        // (UP at the edge) and reopening it at the anchor (DOWN). A single
+        // MOVE back to the anchor would be seen as a reverse fling, so it is
+        // deliberately avoided; the price is one tap-like pair per wrap.
+        double ex = clamp01(tx);
+        double ey = clamp01(ty);
+        inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, ex, ey,
+                          im->motion.pointer_id);
+        inject_touch_norm(im, AMOTION_EVENT_ACTION_UP, ex, ey,
+                          im->motion.pointer_id);
+        im->motion.cur_nx = im->motion.anchor_nx;
+        im->motion.cur_ny = im->motion.anchor_ny;
+        inject_touch_norm(im, AMOTION_EVENT_ACTION_DOWN, im->motion.cur_nx,
+                          im->motion.cur_ny, im->motion.pointer_id);
+        return true;
+    }
+
+    im->motion.cur_nx = tx;
+    im->motion.cur_ny = ty;
+    inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, tx, ty,
+                      im->motion.pointer_id);
+    return true;
+}
+
+// ==================== 映射激活 / 依赖 ====================
+
+static bool
+key_held(struct sc_input_manager *im, SDL_Keycode kc) {
+    if (SC_MAPPING_KEYCODE_IS_MOUSE(kc)) {
+        int button = SC_MAPPING_KEYCODE_MOUSE_BUTTON(kc);
+        return button >= 1 && button <= 5 && im->map_mouse_down[button];
+    }
+    return im->g_pressed[kc & 0xFF];
+}
+
+static bool
+dep_ok(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    if (e->dep == SC_MAPPING_DEP_NONE) return true;
+    bool held = key_held(im, e->dep_key);
+    return e->dep == SC_MAPPING_DEP_PRESSED ? held : !held;
+}
+
+// Physical state of the entry's own trigger (mouse buttons included).
+static bool
+entry_trigger_held(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    if (e->nkeys == 1) {
+        return key_held(im, e->keys[0]);
+    }
+    return e->active; // combos: driven by update_combos()
+}
+
+static void
+entry_activate(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    if (!e || e->active) return;
+    if (!dep_ok(im, e)) {
+        LOGI("Mapping '%s' not entered: dependency '%s' is not %s",
+             e->key_name, sc_mapping_key_name(e->dep_key),
+             e->dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
+        return;
+    }
+    e->active = true;
+    e->down = true;
+    if (e->type == SC_MAPPING_TYPE_SLIDE) {
+        if (!slide_start(im, e)) {
+            // Could not open a slide slot / inject the DOWN: report it as
+            // released so nothing is left marked as pressed.
+            e->active = false;
+            e->down = false;
+        }
+    } else {
+        inject_entry(im, e, AMOTION_EVENT_ACTION_DOWN);
+    }
+}
+
+static void
+entry_deactivate(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    if (!e) return;
+    bool was = e->active || e->down;
+    e->active = false;
+    e->down = false;
+    if (e->type == SC_MAPPING_TYPE_SLIDE) {
+        slide_stop_for_entry(im, e);
+    } else if (e->type == SC_MAPPING_TYPE_MOTION) {
+        motion_stop(im);
+    } else if (was) {
+        // UP is always sent at most once per activation: `was` guards against
+        // a second UP for an entry that was only marked as down.
+        inject_entry(im, e, AMOTION_EVENT_ACTION_UP);
+    }
+}
+
+// Re-evaluate every dependency after a key/button state change. This is what
+// makes "dependency satisfied" and "dependency lost" enter/exit the mapping
+// without ever dropping the UP.
+static void
+evaluate_dependencies(struct sc_input_manager *im) {
+    struct sc_mapping_manager *mm = mm_of(im);
+    for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
+        struct sc_mapping_entry *e = &mm->entries[i];
+        if (!e->key_name || e->dep == SC_MAPPING_DEP_NONE) continue;
+        if (e->nkeys >= 2) continue; // combos: handled inside update_combos()
+        if (!dep_ok(im, e)) {
+            if (e->active || e->down) {
+                entry_deactivate(im, e);
+                LOGI("Mapping '%s' released: dependency lost", e->key_name);
+            }
+            continue;
+        }
+        // Momentary mappings re-enter while their trigger is still held;
+        // toggles wait for the next explicit press edge.
+        if (e->mode == SC_MAPPING_MODE_MOMENTARY && !e->active
+                && entry_trigger_held(im, e)) {
+            entry_activate(im, e);
+            LOGI("Mapping '%s' entered: dependency satisfied", e->key_name);
+        }
+    }
+}
+
 // Lift every held entry (combos and single keys). Called before any state that
 // invalidates the entries (hot-reload, template switch, disable, destroy).
 static void
@@ -288,25 +528,26 @@ mapping_release_all(void *userdata) {
     struct sc_input_manager *im = userdata;
     struct sc_mapping_manager *mm = mm_of(im);
 
-    // Running slides must be stopped (and their UP injected) before the
-    // entries they were derived from are replaced.
+    // Running motion / slides must be stopped (and their UP injected) before
+    // the entries they were derived from are replaced.
+    motion_stop(im);
     slide_stop_all(im);
 
     for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
         struct sc_mapping_entry *e = &mm->entries[i];
         if (!e->key_name) continue;
-        if (e->active) {
-            e->active = false;
-            inject_entry(im, e, AMOTION_EVENT_ACTION_UP);
-        }
-        if (e->down) {
-            e->down = false;
+        bool was = e->active || e->down;
+        e->active = false;
+        e->down = false;
+        // Slides already sent their UP through slide_stop_all(); motion
+        // entries never own an entry-level DOWN.
+        if (was && e->type == SC_MAPPING_TYPE_TOUCH) {
             inject_entry(im, e, AMOTION_EVENT_ACTION_UP);
         }
     }
     memset(im->g_pressed, 0, sizeof(im->g_pressed));
+    memset(im->map_mouse_down, 0, sizeof(im->map_mouse_down));
     im->left_click_locked_down = false;
-    im->right_click_down = false;
 }
 
 // Update all combos based on currently pressed keys
@@ -324,15 +565,17 @@ update_combos(struct sc_input_manager *im) {
                 break;
             }
         }
+        if (match && !dep_ok(im, c)) {
+            match = false;
+        }
 
         if (match && !c->active) {
             // Release single-key downs for combo members
             for (int j = 0; j < c->nkeys; ++j) {
                 struct sc_mapping_entry *m =
                     sc_mapping_manager_find_single(mm, c->keys[j]);
-                if (m && m->down) {
-                    inject_entry(im, m, AMOTION_EVENT_ACTION_UP);
-                    m->down = false;
+                if (m && (m->down || m->active)) {
+                    entry_deactivate(im, m);
                 }
             }
             c->active = true;
@@ -342,15 +585,15 @@ update_combos(struct sc_input_manager *im) {
             c->active = false;
             inject_entry(im, c, AMOTION_EVENT_ACTION_UP);
             LOGI("Combo up: %s", c->key_name);
-            // Re-press single keys still held
+            // Re-press single keys still held (entry_activate re-checks the
+            // dependency condition)
             for (int j = 0; j < c->nkeys; ++j) {
                 if (!im->g_pressed[c->keys[j] & 0xFF]) continue;
                 struct sc_mapping_entry *m =
                     sc_mapping_manager_find_single(mm, c->keys[j]);
                 // Slides are never combo members (rejected at load time)
-                if (m && !m->down && m->type != SC_MAPPING_TYPE_SLIDE) {
-                    inject_entry(im, m, AMOTION_EVENT_ACTION_DOWN);
-                    m->down = true;
+                if (m && !m->active && m->type != SC_MAPPING_TYPE_SLIDE) {
+                    entry_activate(im, m);
                 }
             }
         }
@@ -404,6 +647,7 @@ toggle_design_mode(struct sc_input_manager *im) {
     im->design_mode = !im->design_mode;
     if (im->design_mode) {
         close_template_switch(im); // never two overlays at once
+        motion_stop(im);           // no synthetic swipe while picking points
         sc_mapping_manager_design_reset(mm_of(im));
         sc_overlay_set_design(ov, true,
             "Design: click position, then press a key. F3 to exit.");
@@ -441,6 +685,47 @@ manager_selected_entry(struct sc_input_manager *im) {
     struct sc_overlay *ov = ov_of(im);
     int idx = entry_index_by_sel(mm_of(im), ov->mgr_entry_sel);
     return idx >= 0 ? &mm_of(im)->entries[idx] : NULL;
+}
+
+// Update one entry through the same validator as the JSON loader, keeping the
+// fields the caller does not change (mode, dependency, sensitivity). Without
+// this the panel would silently reset the new optional fields on every edit.
+static bool
+manager_apply(struct sc_input_manager *im, struct sc_mapping_entry *e,
+              double nx, double ny, double ndx, double ndy, int duration_ms,
+              enum sc_mapping_mode mode, SDL_Keycode dep_key,
+              enum sc_mapping_dep dep, double sensitivity,
+              char *err, size_t errlen) {
+    const char *dep_name = dep == SC_MAPPING_DEP_NONE
+                         ? NULL : sc_mapping_key_name(dep_key);
+    return sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, e->type,
+                                        nx, ny, ndx, ndy, duration_ms, mode,
+                                        dep_name, dep, sensitivity, err, errlen);
+}
+
+static void
+manager_set_dep(struct sc_input_manager *im, struct sc_mapping_entry *e,
+                SDL_Keycode dep_key, enum sc_mapping_dep dep) {
+    struct sc_overlay *ov = ov_of(im);
+    char err[128];
+    if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
+                       e->mode, dep_key, dep, e->sensitivity,
+                       err, sizeof(err))) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        LOGW("Manager dependency rejected: %s", err);
+        return;
+    }
+    if (dep == SC_MAPPING_DEP_NONE) {
+        sc_overlay_manager_set_hint(ov, "Dependency cleared (press S to save)");
+    } else {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Depends on %s %s (press S to save)",
+                 sc_mapping_key_name(dep_key),
+                 dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
+        sc_overlay_manager_set_hint(ov, msg);
+    }
 }
 
 static void
@@ -494,7 +779,7 @@ manager_open(struct sc_input_manager *im) {
         }
     }
     sc_overlay_manager_set_hint(ov,
-        "1-5 edit field, Enter commit, N then key = new entry");
+        "1-6 edit field, Enter commit, N new, V motion, M mode, D depend");
     LOGI("Manager panel opened");
 }
 
@@ -507,7 +792,6 @@ manager_close(struct sc_input_manager *im) {
     // Restore every bit of input state the panel may have touched
     mapping_release_all(im);
     im->left_click_locked_down = false;
-    im->right_click_down = false;
     // Dirty-gated: nothing is written when nothing was modified
     sc_mapping_manager_save_active(mm);
     LOGI("Manager panel closed");
@@ -526,6 +810,11 @@ manager_begin_edit(struct sc_input_manager *im, int field) {
             "dx/dy/duration need a slide entry (press T)");
         return;
     }
+    if (field == 5 && e->type != SC_MAPPING_TYPE_MOTION) {
+        sc_overlay_manager_set_hint(ov,
+            "sensitivity needs the MOUSE_MOVE motion entry (press V)");
+        return;
+    }
     ov->mgr_edit_field = field;
     ov->mgr_edit_len = 0;
     ov->mgr_edit_buf[0] = '\0';
@@ -539,13 +828,14 @@ manager_begin_edit(struct sc_input_manager *im, int field) {
                                   "%.5f", e->ndy);
     else if (field == 4) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
                                   "%d", e->duration_ms);
+    else if (field == 5) snprintf(ov->mgr_edit_buf, sizeof(ov->mgr_edit_buf),
+                                  "%.2f", e->sensitivity);
     ov->mgr_edit_len = (int) strlen(ov->mgr_edit_buf);
 }
 
 static void
 manager_commit_edit(struct sc_input_manager *im) {
     struct sc_overlay *ov = ov_of(im);
-    struct sc_mapping_manager *mm = mm_of(im);
     struct sc_mapping_entry *e = manager_selected_entry(im);
     int field = ov->mgr_edit_field;
     ov->mgr_edit_field = -1;
@@ -554,15 +844,17 @@ manager_commit_edit(struct sc_input_manager *im) {
     double v = atof(ov->mgr_edit_buf);
     double nx = e->nx, ny = e->ny, ndx = e->ndx, ndy = e->ndy;
     int dur = e->duration_ms;
+    double sens = e->sensitivity;
     if (field == 0) nx = v;
     else if (field == 1) ny = v;
     else if (field == 2) ndx = v;
     else if (field == 3) ndy = v;
     else if (field == 4) dur = (int) v;
+    else if (field == 5) sens = v;
 
     char err[128];
-    if (!sc_mapping_manager_upsert(mm, e->key_name, e->type, nx, ny, ndx, ndy,
-                                   dur, err, sizeof(err))) {
+    if (!manager_apply(im, e, nx, ny, ndx, ndy, dur, e->mode, e->dep_key,
+                       e->dep, sens, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -584,8 +876,18 @@ manager_create_entry(struct sc_input_manager *im, const char *key_name) {
         ny = mm->design_ny;
     }
     char err[128];
-    if (!sc_mapping_manager_upsert(mm, key_name, SC_MAPPING_TYPE_TOUCH,
-                                   nx, ny, 0.0, 0.0, 0, err, sizeof(err))) {
+    struct sc_mapping_entry *existing =
+        sc_mapping_manager_find_by_name(mm, key_name);
+    // Re-binding an existing key only moves it: keep mode / dependency /
+    // sensitivity instead of resetting them to their defaults.
+    bool ok = existing
+        ? manager_apply(im, existing, nx, ny, existing->ndx, existing->ndy,
+                        existing->duration_ms, existing->mode,
+                        existing->dep_key, existing->dep,
+                        existing->sensitivity, err, sizeof(err))
+        : sc_mapping_manager_upsert(mm, key_name, SC_MAPPING_TYPE_TOUCH,
+                                    nx, ny, 0.0, 0.0, 0, err, sizeof(err));
+    if (!ok) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -595,6 +897,41 @@ manager_create_entry(struct sc_input_manager *im, const char *key_name) {
     sc_mapping_manager_design_reset(mm);
     manager_refresh_templates(im);
     sc_overlay_manager_set_hint(ov, "Entry added (press S to save)");
+}
+
+// Create the reserved MOUSE_MOVE motion entry (there is no key to press for
+// it, so the panel needs its own action).
+static void
+manager_create_motion(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_manager *mm = mm_of(im);
+
+    if (sc_mapping_manager_find_by_name(mm, "MOUSE_MOVE")) {
+        sc_overlay_manager_set_hint(ov, "MOUSE_MOVE entry already exists");
+        return;
+    }
+    double nx = 0.5, ny = 0.5;
+    if (sc_mapping_manager_design_has_point(mm)) {
+        nx = mm->design_nx;
+        ny = mm->design_ny;
+    }
+    char err[128];
+    if (!sc_mapping_manager_upsert_ex(mm, "MOUSE_MOVE",
+                                      SC_MAPPING_TYPE_MOTION, nx, ny,
+                                      0.0, 0.0, 0, SC_MAPPING_MODE_MOMENTARY,
+                                      NULL, SC_MAPPING_DEP_NONE,
+                                      SC_MAPPING_SENSITIVITY_DEFAULT,
+                                      err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        LOGW("Manager motion entry rejected: %s", err);
+        return;
+    }
+    sc_mapping_manager_design_reset(mm);
+    manager_refresh_templates(im);
+    sc_overlay_manager_set_hint(ov,
+        "MOUSE_MOVE added (edit 6 for sensitivity, S to save)");
 }
 
 static void
@@ -627,17 +964,28 @@ manager_toggle_type(struct sc_input_manager *im) {
         sc_overlay_manager_set_hint(ov, "Mouse entries cannot be slides");
         return;
     }
+    if (e->type == SC_MAPPING_TYPE_MOTION) {
+        sc_overlay_manager_set_hint(ov,
+            "MOUSE_MOVE is always a motion entry");
+        return;
+    }
     enum sc_mapping_entry_type new_type =
         e->type == SC_MAPPING_TYPE_SLIDE ? SC_MAPPING_TYPE_TOUCH
                                          : SC_MAPPING_TYPE_SLIDE;
     double ndx = e->type == SC_MAPPING_TYPE_SLIDE ? e->ndx : 0.0;
     double ndy = e->type == SC_MAPPING_TYPE_SLIDE ? e->ndy : -0.3;
     int dur = e->type == SC_MAPPING_TYPE_SLIDE ? e->duration_ms : 200;
+    // Toggle is only valid for touch entries, so switching to slide drops it.
+    enum sc_mapping_mode mode = new_type == SC_MAPPING_TYPE_SLIDE
+                             ? SC_MAPPING_MODE_MOMENTARY : e->mode;
 
     char err[128];
-    if (!sc_mapping_manager_upsert(mm_of(im), e->key_name, new_type,
-                                   e->nx, e->ny, ndx, ndy, dur,
-                                   err, sizeof(err))) {
+    if (!sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, new_type,
+                                      e->nx, e->ny, ndx, ndy, dur, mode,
+                                      e->dep == SC_MAPPING_DEP_NONE ? NULL
+                                          : sc_mapping_key_name(e->dep_key),
+                                      e->dep, e->sensitivity,
+                                      err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -678,8 +1026,9 @@ manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
         dy = ny - e->ny;
     }
     char err[128];
-    if (!sc_mapping_manager_upsert(mm_of(im), e->key_name, e->type, x, y,
-                                   dx, dy, e->duration_ms, err, sizeof(err))) {
+    if (!manager_apply(im, e, x, y, dx, dy, e->duration_ms, e->mode,
+                       e->dep_key, e->dep, e->sensitivity,
+                       err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -689,11 +1038,74 @@ manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
                                               : "Slide end point updated");
 }
 
+static void
+manager_toggle_mode(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    if (e->type != SC_MAPPING_TYPE_TOUCH || e->nkeys != 1) {
+        sc_overlay_manager_set_hint(ov,
+            "mode needs a single-key touch entry");
+        return;
+    }
+    enum sc_mapping_mode mode = e->mode == SC_MAPPING_MODE_TOGGLE
+                              ? SC_MAPPING_MODE_MOMENTARY
+                              : SC_MAPPING_MODE_TOGGLE;
+    char err[128];
+    if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
+                       mode, e->dep_key, e->dep, e->sensitivity,
+                       err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        return;
+    }
+    sc_overlay_manager_set_hint(ov, mode == SC_MAPPING_MODE_TOGGLE
+        ? "Mode: toggle (press S to save)"
+        : "Mode: momentary (press S to save)");
+}
+
+// D cycles: no dependency -> capture key (pressed) -> released -> none.
+static void
+manager_cycle_dep(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    if (e->dep == SC_MAPPING_DEP_NONE) {
+        ov->mgr_capture_dep = true;
+        sc_overlay_manager_set_hint(ov,
+            "Press the dependency key (Esc cancels)");
+    } else if (e->dep == SC_MAPPING_DEP_PRESSED) {
+        manager_set_dep(im, e, e->dep_key, SC_MAPPING_DEP_RELEASED);
+    } else {
+        manager_set_dep(im, e, 0, SC_MAPPING_DEP_NONE);
+    }
+}
+
 // Returns true when the key was consumed by the panel.
 static bool
 manager_handle_key(struct sc_input_manager *im, SDL_Keycode kc) {
     struct sc_overlay *ov = ov_of(im);
     struct sc_mapping_manager *mm = mm_of(im);
+
+    if (ov->mgr_capture_dep) {
+        ov->mgr_capture_dep = false;
+        struct sc_mapping_entry *e = manager_selected_entry(im);
+        if (!e) {
+            sc_overlay_manager_set_hint(ov, "No entry selected");
+        } else if (kc == SDLK_ESCAPE) {
+            sc_overlay_manager_set_hint(ov, "Cancelled");
+        } else {
+            manager_set_dep(im, e, kc, SC_MAPPING_DEP_PRESSED);
+        }
+        return true;
+    }
 
     if (ov->mgr_capture_key) {
         ov->mgr_capture_key = false;
@@ -774,6 +1186,16 @@ manager_handle_key(struct sc_input_manager *im, SDL_Keycode kc) {
     case SDLK_3: manager_begin_edit(im, 2); return true;
     case SDLK_4: manager_begin_edit(im, 3); return true;
     case SDLK_5: manager_begin_edit(im, 4); return true;
+    case SDLK_6: manager_begin_edit(im, 5); return true;
+    case SDLK_M:
+        manager_toggle_mode(im);
+        return true;
+    case SDLK_D:
+        manager_cycle_dep(im);
+        return true;
+    case SDLK_V:
+        manager_create_motion(im);
+        return true;
     case SDLK_N:
         ov->mgr_capture_key = true;
         sc_overlay_manager_set_hint(ov, "Press the key to bind (Esc cancels)");
@@ -886,7 +1308,8 @@ sc_input_manager_init(struct sc_input_manager *im,
     memset(im->g_pressed, 0, sizeof(im->g_pressed));
     im->left_click_locked = false;
     im->left_click_locked_down = false;
-    im->right_click_down = false;
+    memset(im->map_mouse_down, 0, sizeof(im->map_mouse_down));
+    memset(&im->motion, 0, sizeof(im->motion));
     im->design_mode = false;
     im->switch_open = false;
 
@@ -1320,20 +1743,24 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             return;
         }
 
-        bool is_mapping_key = sc_mapping_manager_find_single(mm, sdl_keycode) != NULL;
+        bool is_mapping_key =
+            sc_mapping_manager_find_single(mm, sdl_keycode) != NULL;
         bool is_combo_key = sc_mapping_manager_key_in_combo(mm, sdl_keycode);
+        // A dependency key may not be mapped at all, but its state must still
+        // be tracked, otherwise the dependency could never change.
+        bool is_dep_key =
+            sc_mapping_manager_key_is_dependency(mm, sdl_keycode);
 
-        if (is_mapping_key || is_combo_key) {
+        if (is_mapping_key || is_combo_key || is_dep_key) {
             if (down && repeat) return;  // 忽略键盘自动重复
 
-            if (down) im->g_pressed[sdl_keycode & 0xFF] = true;
-            else im->g_pressed[sdl_keycode & 0xFF] = false;
+            im->g_pressed[sdl_keycode & 0xFF] = down;
 
             update_combos(im);
 
             struct sc_mapping_entry *m =
                 sc_mapping_manager_find_single(mm, sdl_keycode);
-            if (m) {
+            if (m && !m->is_mouse) {
                 // 如果该键被已激活的 combo 覆盖，跳过单键逻辑
                 bool covered = false;
                 for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; ++i) {
@@ -1344,35 +1771,32 @@ sc_input_manager_process_key(struct sc_input_manager *im,
                     }
                     if (covered) break;
                 }
-                if (!covered) {
-                    if (down && m->down) return;
-                    if (!down && !m->down) return;
-                    if (m->type == SC_MAPPING_TYPE_SLIDE) {
-                        // hold-to-slide: press starts the slide, release stops
-                        if (down) {
-                            m->down = true;
-                            slide_start(im, m);
+                if (covered) {
+                    if (!down && (m->active || m->down)) {
+                        entry_deactivate(im, m);
+                    }
+                } else if (m->mode == SC_MAPPING_MODE_TOGGLE) {
+                    // Toggle flips on the press edge only; the release edge
+                    // must not touch the injected state.
+                    if (down) {
+                        if (m->active) {
+                            entry_deactivate(im, m);
                         } else {
-                            m->down = false;
-                            slide_stop_for_entry(im, m);
+                            entry_activate(im, m);
                         }
-                    } else {
-                        enum android_motionevent_action action = down
-                            ? AMOTION_EVENT_ACTION_DOWN
-                            : AMOTION_EVENT_ACTION_UP;
-                        inject_entry(im, m, action);
-                        m->down = down;
                     }
-                } else if (!down && m->down) {
-                    m->down = false;
-                    if (m->type == SC_MAPPING_TYPE_SLIDE) {
-                        slide_stop_for_entry(im, m);
-                    } else {
-                        inject_entry(im, m, AMOTION_EVENT_ACTION_UP);
-                    }
+                } else if (down) {
+                    entry_activate(im, m);
+                } else {
+                    entry_deactivate(im, m);
                 }
             }
-            return;
+
+            // Any key state change may satisfy or break a dependency.
+            evaluate_dependencies(im);
+
+            // Dependency-only keys keep their normal forwarding.
+            if (is_mapping_key || is_combo_key) return;
         }
     }
 
@@ -1595,10 +2019,14 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
 
     // 管理面板打开时鼠标移动不转发到设备（面板本身由键盘驱动）；面板关闭后
     // 转发行为与打开前完全一致。
-    if (overlay_manager_open(im)) return;
+    if (overlay_manager_open(im)) {
+        motion_stop(im); // never leave a synthetic swipe held under the panel
+        return;
+    }
 
     // If switch popup is open, update hover (and request a debounced switch)
     if (im->switch_open) {
+        motion_stop(im);
         int hovered = sc_overlay_update_switch_mouse(ov_of(im),
                                                      (float)event->x,
                                                      (float)event->y);
@@ -1610,6 +2038,13 @@ sc_input_manager_process_mouse_motion(struct sc_input_manager *im,
                 sc_mapping_manager_request_switch(mm_of(im), names[hovered]);
             }
         }
+        return;
+    }
+
+    // Mouse-motion mapping: while any mouse button is held, the delta drives a
+    // synthetic swipe. Consumed in that case so the physical pointer (and the
+    // virtual finger) does not fight the injected one for the same device.
+    if (motion_feed(im, event->xrel, event->yrel)) {
         return;
     }
 
@@ -1676,6 +2111,13 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     bool paused = im->screen->paused;
     bool down = event->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
 
+    // Track the physical button state first, before any early return (design
+    // mode, switch popup, manager panel): a button pressed before entering an
+    // overlay must not stay "held" for the motion mapping after leaving it.
+    if (event->button >= 1 && event->button <= 5) {
+        im->map_mouse_down[event->button] = down;
+    }
+
     // 管理面板打开时鼠标归面板所有：左键用于列表选择 / 取点，其它键吞掉，
     // 全部不转发到设备。关闭面板时 manager_close() 会复位按键与锁定状态。
     if (overlay_manager_open(im)) {
@@ -1739,7 +2181,7 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
 
     // ==================== 自定义鼠标拦截 ====================
     if (mm->enabled && !im->design_mode && control && !paused) {
-        // 左键锁定
+        // 左键锁定（保留原有语义，优先于普通 MOUSE_LEFT 绑定）
         if (event->button == SDL_BUTTON_LEFT && im->left_click_locked) {
             if (down == im->left_click_locked_down) return;
             im->left_click_locked_down = down;
@@ -1754,18 +2196,33 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
             return;
         }
 
-        // 右键固定映射
-        if (event->button == SDL_BUTTON_RIGHT) {
-            if (down == im->right_click_down) return;
-            im->right_click_down = down;
-            enum android_motionevent_action action = down
-                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
-            int idx = mm->mouse_right_idx;
-            if (idx >= 0 && mm->entries[idx].key_name) {
-                inject_entry(im, &mm->entries[idx], action);
+        // Any button bound in the template (MOUSE_LEFT / MOUSE_MIDDLE /
+        // MOUSE_RIGHT / MOUSE_X1 / MOUSE_X2) is consumed and injected instead
+        // of being forwarded to the device.
+        SDL_Keycode mkc = SC_MAPPING_MOUSE_KEY(event->button);
+        struct sc_mapping_entry *m = sc_mapping_manager_find_single(mm, mkc);
+        if (m) {
+            if (m->mode == SC_MAPPING_MODE_TOGGLE) {
+                if (down) {
+                    if (m->active) {
+                        entry_deactivate(im, m);
+                    } else {
+                        entry_activate(im, m);
+                    }
+                }
+            } else if (down) {
+                entry_activate(im, m);
+            } else {
+                entry_deactivate(im, m);
             }
-            return;
         }
+
+        // A mouse button may also be a dependency source (for single entries
+        // and for combos: update_combos() re-checks dep_ok()).
+        update_combos(im);
+        evaluate_dependencies(im);
+
+        if (m) return;
     }
 
     enum sc_mouse_button button = sc_mouse_button_from_sdl(event->button);
@@ -2003,8 +2460,10 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
             sc_input_manager_on_device_disconnected(im);
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
-            // Losing focus must stop every slide (the key up will never arrive)
+            // Losing focus must stop every slide and the motion swipe (the key
+            // up / button release will never arrive)
             slide_stop_all(im);
+            motion_stop(im);
             break;
     }
 }
