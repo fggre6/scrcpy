@@ -1038,7 +1038,7 @@ manager_create_motion(struct sc_input_manager *im) {
                                       0.0, 0.0, 0, SC_MAPPING_MODE_MOMENTARY,
                                       NULL, SC_MAPPING_DEP_NONE,
                                       SC_MAPPING_SENSITIVITY_DEFAULT,
-                                      SC_MOTION_HOLD_BUTTON,
+                                      SC_MOTION_HOLD_BUTTON, false,
                                       err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
