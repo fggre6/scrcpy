@@ -403,24 +403,16 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
 
     double tx = im->motion.cur_nx + dnx;
     double ty = im->motion.cur_ny + dny;
-    if (latched) {
-        // Look mode: the finger must never lift while the mode is on, so the
-        // boundary is a hard clamp instead of a wrap. Keeping the position
-        // clamped (and not an unbounded internal position) means moving the
-        // mouse back rotates immediately, with no dead zone. The limit is
-        // physical: a single never-lifting finger cannot rotate forever.
-        im->motion.cur_nx = clamp01(tx);
-        im->motion.cur_ny = clamp01(ty);
-        inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, im->motion.cur_nx,
-                          im->motion.cur_ny, im->motion.pointer_id);
-        return true;
-    }
 
     if (tx < 0.0 || tx > 1.0 || ty < 0.0 || ty > 1.0) {
-        // Boundary: clamp the injected point, then wrap by closing the stroke
-        // (UP at the edge) and reopening it at the anchor (DOWN). A single
-        // MOVE back to the anchor would be seen as a reverse fling, so it is
-        // deliberately avoided; the price is one tap-like pair per wrap.
+        // Boundary wrap (applies to both button and look modes): move to the
+        // clamped edge, close the stroke there with an UP, then reopen it at
+        // the anchor with a DOWN and keep sliding in the same direction. This
+        // mirrors the slide type (see sc_input_manager_tick), which feels
+        // smooth. A single MOVE teleporting back to the anchor would be read as
+        // a fast reverse stroke and yank the view back, so it is deliberately
+        // avoided; the cost is one UP/DOWN pair per wrap, with no dead zone in
+        // either direction afterwards.
         double ex = clamp01(tx);
         double ey = clamp01(ty);
         inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, ex, ey,
