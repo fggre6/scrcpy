@@ -87,6 +87,14 @@ inject_touch_norm(struct sc_input_manager *im,
              action == AMOTION_EVENT_ACTION_UP ? "UP" : "DOWN",
              (int) pointer_id);
     }
+    // #region debug-point C:move-push-failed
+    if (action == AMOTION_EVENT_ACTION_MOVE) {
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+             "hypothesisId=C location=input_manager.c:inject_touch_norm "
+             "msg=move-push-failed pointer=%d",
+             (int) pointer_id);
+    }
+    // #endregion
     return false;
 }
 
@@ -251,6 +259,21 @@ sc_input_manager_tick(struct sc_input_manager *im) {
     if (im->motion.active && blocked) {
         motion_stop(im);
     }
+
+    // #region debug-point A:motion-pending-at-tick
+    if (im->motion.active
+            && (im->motion.pend_nx != 0.0 || im->motion.pend_ny != 0.0)
+            && sc_tick_now() - im->motion.last_inject
+               >= SC_TICK_FROM_MS(8)) {
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+             "hypothesisId=A location=input_manager.c:sc_input_manager_tick "
+             "msg=overdue-motion-pending-at-tick now=%" PRItick
+             " elapsed_us=%" PRItick " pend_nx=%f pend_ny=%f",
+             sc_tick_now(),
+             SC_TICK_TO_US(sc_tick_now() - im->motion.last_inject),
+             im->motion.pend_nx, im->motion.pend_ny);
+    }
+    // #endregion
 
     bool any = false;
     for (int i = 0; i < SC_MAX_SLIDES; i++) {
@@ -444,6 +467,12 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
         im->motion.discard_next = false;
         im->motion.pend_nx = 0.0;
         im->motion.pend_ny = 0.0;
+        // #region debug-point D:capture-delta-discarded
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+             "hypothesisId=D location=input_manager.c:motion_feed "
+             "msg=capture-delta-discarded now=%" PRItick " xrel=%f yrel=%f",
+             sc_tick_now(), (double) xrel, (double) yrel);
+        // #endregion
         return true;
     }
 
@@ -457,6 +486,17 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
     double dny = im->motion.pend_ny;
     im->motion.pend_nx = 0.0;
     im->motion.pend_ny = 0.0;
+    // #region debug-point B:motion-injection-attempt
+    static unsigned debug_injection_seq;
+    if ((++debug_injection_seq & 15) == 0) {
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+             "hypothesisId=B location=input_manager.c:motion_feed "
+             "msg=motion-injection-sample now=%" PRItick
+             " interval_us=%" PRItick " dnx=%f dny=%f",
+             sc_tick_now(),
+             SC_TICK_TO_US(sc_tick_now() - im->motion.last_inject), dnx, dny);
+    }
+    // #endregion
     im->motion.last_inject = sc_tick_now();
 
     double tx = im->motion.cur_nx + dnx;
@@ -473,6 +513,12 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
         // either direction afterwards.
         double ex = clamp01(tx);
         double ey = clamp01(ty);
+        // #region debug-point D:motion-wrap
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+             "hypothesisId=D location=input_manager.c:motion_feed "
+             "msg=motion-wrap now=%" PRItick " ex=%f ey=%f dnx=%f dny=%f",
+             sc_tick_now(), ex, ey, dnx, dny);
+        // #endregion
         inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, ex, ey,
                           im->motion.pointer_id);
         inject_touch_norm(im, AMOTION_EVENT_ACTION_UP, ex, ey,
