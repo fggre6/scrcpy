@@ -119,6 +119,9 @@ sc_controller_push_msg(struct sc_controller *controller,
         }
     }
     // Otherwise, the msg is discarded
+
+    sc_mutex_unlock(&controller->mutex);
+
     // #region debug-point C:control-queue-drop
     if (!pushed && sc_control_msg_is_droppable(msg)) {
         LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
@@ -127,8 +130,6 @@ sc_controller_push_msg(struct sc_controller *controller,
              (int) msg->type, size);
     }
     // #endregion
-
-    sc_mutex_unlock(&controller->mutex);
 
     return pushed;
 }

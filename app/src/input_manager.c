@@ -87,14 +87,6 @@ inject_touch_norm(struct sc_input_manager *im,
              action == AMOTION_EVENT_ACTION_UP ? "UP" : "DOWN",
              (int) pointer_id);
     }
-    // #region debug-point C:move-push-failed
-    if (action == AMOTION_EVENT_ACTION_MOVE) {
-        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
-             "hypothesisId=C location=input_manager.c:inject_touch_norm "
-             "msg=move-push-failed pointer=%d",
-             (int) pointer_id);
-    }
-    // #endregion
     return false;
 }
 
