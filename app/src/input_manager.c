@@ -114,6 +114,9 @@ slide_stop_all(struct sc_input_manager *im);
 static void
 motion_stop(struct sc_input_manager *im);
 
+static void
+motion_set_capture(struct sc_input_manager *im, bool on);
+
 static bool
 dep_ok(struct sc_input_manager *im, struct sc_mapping_entry *e);
 
@@ -319,8 +322,41 @@ motion_any_button_down(struct sc_input_manager *im) {
     return false;
 }
 
+// Engage/release SDL relative mouse mode for the duration of a motion swipe.
+// Relative mode hides the OS cursor and keeps reporting xrel past the screen
+// edge, which is what lets a swipe (especially look mode) rotate forever;
+// without it the cursor runs into the monitor edge and xrel simply stops. It
+// is released the moment the finger lifts so normal absolute input resumes.
+static void
+motion_set_capture(struct sc_input_manager *im, bool on) {
+    struct sc_motion_run *r = &im->motion;
+    if (r->capture_active == on) {
+        return;
+    }
+    SDL_Window *window = im->screen ? im->screen->window : NULL;
+    if (!window) {
+        return;
+    }
+    if (!SDL_SetWindowRelativeMouseMode(window, on)) {
+        LOGE("Could not set relative mouse mode to %s: %s",
+             on ? "true" : "false", SDL_GetError());
+        return;
+    }
+    r->capture_active = on;
+    if (on) {
+        // Entering relative mode recenters the cursor; the next motion event
+        // reports that jump as a delta. Drop it so the finger does not lurch.
+        r->discard_next = true;
+        r->pend_nx = 0.0;
+        r->pend_ny = 0.0;
+    } else {
+        r->discard_next = false;
+    }
+}
+
 static void
 motion_stop(struct sc_input_manager *im) {
+    motion_set_capture(im, false); // always restore the cursor, even on teardown
     if (!im->motion.active) return;
     // Close the swipe with an UP at the last injected point. There is no
     // teleport back to the anchor: a single MOVE across the screen would be
@@ -356,7 +392,12 @@ motion_start(struct sc_input_manager *im, struct sc_mapping_entry *e) {
         r->active = false;
         e->active = false;
         e->down = false;
+        return;
     }
+    // DOWN succeeded: hide and confine the OS cursor so it never hits the
+    // screen edge and keeps feeding xrel for the whole swipe. The recenter
+    // jump is dropped in motion_feed().
+    motion_set_capture(im, true);
 }
 
 // Convert the mouse delta of one event into the movement of the synthetic
@@ -387,6 +428,15 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
     if (!im->motion.active) {
         motion_start(im, e);
         if (!im->motion.active) return true;
+        // This event's delta was produced before the cursor was recentered,
+        // so it is a genuine user movement and is applied normally below.
+    } else if (im->motion.discard_next) {
+        // This event reports the recenter jump caused by entering relative
+        // mouse mode; drop it so the finger does not lurch across the screen.
+        im->motion.discard_next = false;
+        im->motion.pend_nx = 0.0;
+        im->motion.pend_ny = 0.0;
+        return true;
     }
 
     im->motion.pend_nx += (double) xrel * im->motion.sensitivity / (double) fw;
@@ -2161,6 +2211,18 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     // overlay must not stay "held" for the motion mapping after leaving it.
     if (event->button >= 1 && event->button <= 5) {
         im->map_mouse_down[event->button] = down;
+    }
+
+    // Button-gated motion (hold != always) must stop as soon as no mouse
+    // button is held, even if no further motion event arrives. Stopping here
+    // releases the relative-mouse capture immediately, so the cursor does not
+    // stay hidden until the next mouse wiggle. Latched (look) mode is untouched.
+    if (im->motion.active) {
+        struct sc_mapping_entry *e = find_motion_entry(mm_of(im));
+        bool latched = e && e->hold == SC_MOTION_HOLD_ALWAYS;
+        if (!latched && !motion_any_button_down(im)) {
+            motion_stop(im);
+        }
     }
 
     // 管理面板打开时鼠标归面板所有：左键用于列表选择 / 取点，其它键吞掉，

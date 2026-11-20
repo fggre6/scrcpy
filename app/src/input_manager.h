@@ -45,6 +45,13 @@ struct sc_motion_run {
     double sensitivity;
     double pend_nx, pend_ny;     // deltas not yet injected (rate limiting)
     sc_tick last_inject;
+    // Relative mouse mode is engaged while the finger is down so the OS
+    // cursor is hidden and keeps producing xrel past the screen edge. It is
+    // released the moment the finger lifts, so absolute input works again.
+    bool capture_active;
+    // The first motion event after (re)entering relative mode carries the
+    // recenter jump (old position -> window center); drop that one delta.
+    bool discard_next;
 };
 
 struct sc_input_manager {
