@@ -311,6 +311,14 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
         draw_text(renderer, dx0, y, line, 200, 255, 200);
         y += MGR_ROW_H * 1.4f;
 
+        if (e->type == SC_MAPPING_TYPE_MOTION) {
+            snprintf(line, sizeof(line), "hold: %s",
+                     e->hold == SC_MOTION_HOLD_ALWAYS
+                     ? "always (look mode)" : "while a button is down");
+            draw_text(renderer, dx0, y, line, 200, 225, 255);
+            y += MGR_ROW_H * 1.4f;
+        }
+
         if (e->dep != SC_MAPPING_DEP_NONE) {
             snprintf(line, sizeof(line), "depend: %s %s",
                      sc_mapping_key_name(e->dep_key),
@@ -364,7 +372,7 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
                20, 20, 26, 235);
     const char *keys =
         "Tab focus  Up/Down select  N new  Del remove  T type  M mode  "
-        "D depend  V motion  P pick  O end  E enable  S save";
+        "D depend  V motion  H hold  P pick  O end  E enable  S save";
     draw_text(renderer, 8, fy + 4, keys, 170, 190, 220);
     const char *hint = ov->mgr_hint[0] ? ov->mgr_hint : "";
     draw_text(renderer, 8, fy + 18,

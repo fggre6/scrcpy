@@ -782,6 +782,35 @@ parse_template(const char *path, struct sc_parse_out *out) {
             }
         }
 
+        // hold (optional, motion only): "button" (default) keeps the finger
+        // down only while a mouse button is held; "always" is the look mode
+        // where the finger stays down from the first movement until the
+        // mapping is stopped.
+        enum sc_motion_hold hold = SC_MOTION_HOLD_BUTTON;
+        cJSON *jhold = cJSON_GetObjectItemCaseSensitive(item, "hold");
+        if (jhold) {
+            if (!cJSON_IsString(jhold)) {
+                stat_fail(&out->stats, path, i,
+                          "'hold' must be a string");
+                continue;
+            }
+            if (type != SC_MAPPING_TYPE_MOTION) {
+                stat_fail(&out->stats, path, i,
+                          "'hold' is only valid for type 'motion'");
+                continue;
+            }
+            if (SDL_strcasecmp(jhold->valuestring, "button") == 0) {
+                hold = SC_MOTION_HOLD_BUTTON;
+            } else if (SDL_strcasecmp(jhold->valuestring, "always") == 0) {
+                hold = SC_MOTION_HOLD_ALWAYS;
+            } else {
+                snprintf(err, sizeof(err), "unknown hold '%s'",
+                         jhold->valuestring);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+        }
+
         // Mouse reserved names (the left-button lock is a special entry)
         if (is_mouse_name(key_name)) {
             if (type != SC_MAPPING_TYPE_TOUCH) {
@@ -838,6 +867,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
             e->nx = nx;
             e->ny = ny;
             e->sensitivity = sensitivity;
+            e->hold = hold;
             e->dep = dep;
             e->dep_key = dep_key;
             out->count++;
@@ -1065,6 +1095,9 @@ save_active_impl(struct sc_mapping_manager *mm, bool force) {
         } else if (e->type == SC_MAPPING_TYPE_MOTION) {
             cJSON_AddStringToObject(item, "type", "motion");
             cJSON_AddNumberToObject(item, "sensitivity", e->sensitivity);
+            if (e->hold == SC_MOTION_HOLD_ALWAYS) {
+                cJSON_AddStringToObject(item, "hold", "always");
+            }
         }
         // Optional state fields are written only when they differ from the
         // defaults, so an untouched template keeps its original shape
@@ -1392,6 +1425,7 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
                                         duration_ms, SC_MAPPING_MODE_MOMENTARY,
                                         NULL, SC_MAPPING_DEP_NONE,
                                         SC_MAPPING_SENSITIVITY_DEFAULT,
+                                        SC_MOTION_HOLD_BUTTON,
                                         err, errlen);
 }
 
@@ -1401,7 +1435,8 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
                              double ny, double ndx, double ndy, int duration_ms,
                              enum sc_mapping_mode mode,
                              const char *dep_name, enum sc_mapping_dep dep,
-                             double sensitivity, char *err, size_t errlen) {
+                             double sensitivity, enum sc_motion_hold hold,
+                             char *err, size_t errlen) {
     if (!key_name || !*key_name) {
         ERR_MSG("empty key name");
         return false;
@@ -1438,6 +1473,9 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
     if (is_mouse && dep != SC_MAPPING_DEP_NONE) {
         ERR_MSG("mouse lock entries cannot use a dependency");
         return false;
+    }
+    if (type != SC_MAPPING_TYPE_MOTION) {
+        hold = SC_MOTION_HOLD_BUTTON; // not meaningful for touch / slide
     }
 
     SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
@@ -1563,6 +1601,8 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
     e->duration_ms = e->type == SC_MAPPING_TYPE_SLIDE ? duration_ms : 0;
     e->sensitivity = e->type == SC_MAPPING_TYPE_MOTION ? sensitivity
                                                        : SC_MAPPING_SENSITIVITY_DEFAULT;
+    e->hold = e->type == SC_MAPPING_TYPE_MOTION ? hold
+                                                : SC_MOTION_HOLD_BUTTON;
     e->dep = is_mouse ? SC_MAPPING_DEP_NONE : dep;
     e->dep_key = dep_key;
     e->down = false;
@@ -1670,8 +1710,12 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
     enum sc_mapping_dep dep = old ? old->dep : SC_MAPPING_DEP_NONE;
     SDL_Keycode dep_key = old ? old->dep_key : 0;
     double sensitivity = old ? old->sensitivity : SC_MAPPING_SENSITIVITY_DEFAULT;
+    enum sc_motion_hold hold = old ? old->hold : SC_MOTION_HOLD_BUTTON;
     if (type == SC_MAPPING_TYPE_SLIDE) {
         mode = SC_MAPPING_MODE_MOMENTARY; // toggle is not valid for slides
+    }
+    if (type != SC_MAPPING_TYPE_MOTION) {
+        hold = SC_MOTION_HOLD_BUTTON;
     }
 
     bool ok = sc_mapping_manager_upsert_ex(mm, key_name, type,
@@ -1679,7 +1723,8 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
                                            ndx, ndy, duration, mode,
                                            dep == SC_MAPPING_DEP_NONE ? NULL
                                                : sc_mapping_key_name(dep_key),
-                                           dep, sensitivity, err, sizeof(err));
+                                           dep, sensitivity, hold,
+                                           err, sizeof(err));
     if (ok) {
         sc_mapping_manager_design_reset(mm);
     } else {

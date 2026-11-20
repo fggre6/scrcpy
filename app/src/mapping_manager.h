@@ -39,6 +39,12 @@ enum sc_mapping_dep {
     SC_MAPPING_DEP_RELEASED = 2, // depends_on must be released
 };
 
+// Lifetime of the synthetic finger created by a motion ("MOUSE_MOVE") entry.
+enum sc_motion_hold {
+    SC_MOTION_HOLD_BUTTON = 0, // only while a mouse button is held (default)
+    SC_MOTION_HOLD_ALWAYS = 1, // look mode: finger stays down until mapping off
+};
+
 // Mouse buttons are expressed as synthetic keycodes: real SDL keycodes are
 // never negative, so these can neither collide with nor be produced by a
 // keyboard event. Button numbers follow SDL (1 = left ... 5 = X2).
@@ -76,6 +82,7 @@ struct sc_mapping_entry {
     double ndy;        // slide only
     int duration_ms;   // slide only
     double sensitivity; // motion only
+    enum sc_motion_hold hold;  // motion only: button-gated or latched look mode
     SDL_Keycode dep_key;       // dependency key (valid when dep != NONE)
     enum sc_mapping_dep dep;   // dependency condition
     int32_t pointer_id; // unique pointer id, 0 while unassigned
@@ -219,7 +226,8 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
                              double ny, double ndx, double ndy, int duration_ms,
                              enum sc_mapping_mode mode,
                              const char *dep_name, enum sc_mapping_dep dep,
-                             double sensitivity, char *err, size_t errlen);
+                             double sensitivity, enum sc_motion_hold hold,
+                             char *err, size_t errlen);
 
 // True when some entry depends on this key (its state must be tracked even if
 // the key itself is not mapped).

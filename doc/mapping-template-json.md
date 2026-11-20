@@ -55,6 +55,7 @@
 | `depends_on` | string | 否 | 依赖键：**单个**键名或鼠标按键名（不能是组合键）。见第 6.2 节。 |
 | `depends_state` | string | 否 | `"pressed"`（默认）或 `"released"`；其它值拒绝。没有 `depends_on` 时出现 → 拒绝。 |
 | `sensitivity` | number | 否 | 仅 `type: "motion"` 允许，其它类型给出该字段 → 拒绝。缺省 `1.0`，有效范围 `[0.05, 20.0]`，越界夹取（加载时 `LOGW` 告警；面板编辑静默夹取）。见第 9 节。 |
+| `hold` | string | 否 | 仅 `type: "motion"` 允许。`"button"`（默认）表示只在按住鼠标键时才有虚拟手指；`"always"` 是**视角模式**：从第一次鼠标移动起虚拟手指一直按住不放，直到映射停止。见第 9.4 节。 |
 
 字段校验顺序（与 `parse_template()` 一致）：
 
@@ -69,13 +70,14 @@
 7. `mode` 非 string 或值未知 → 拒绝。
 8. `depends_on` 非空 string 且不能含 `+`；随后解析键名，未知 → 拒绝。`depends_state` 规则见上表。
 9. `sensitivity` 非 number → 拒绝；非 motion 类型出现 → 拒绝（`'sensitivity' is only valid for type 'motion'`）；数值夹到 `[0.05, 20.0]` 并 `LOGW` 告警。
-10. 鼠标保留字 `MOUSE_LEFT_LOCKED` / `LEFT_CLICK_LOCKED` 的特殊分支：不允许 slide/motion（`cannot be a slide` / `cannot be a motion`）、不允许 `mode: toggle`、不允许 `depends_on`。
-11. `type: "motion"` 分支：不允许 `mode: toggle`；其余字段（`depends_on`）允许。
-12. 其余键名走键表达式文法（第 5 节）；解析失败拒绝。**鼠标按键名也算单键**。
-13. `mode: toggle` 要求单键：组合键拒绝（`'mode: toggle' requires a single key, not a combo`）；slide 拒绝（`'mode: toggle' is not supported for slides`）。
-14. `depends_on` 与本条目的单键触发键相同 → 拒绝（`'...' depends on itself`）。
-15. slide：`key` 必须是单个键（组合键拒绝）；`dx`/`dy` 必须都是 number 且落在 `[-1,1]`；`duration_ms` 若存在必须是 number，然后夹取到 `[50,5000]`（夹取只告警，不拒绝）。
-16. 跨条目规则：slide 键不得同时作为某个组合键的成员，否则该 slide 条目被拒绝（`slide key '...' is also used in a combo`）。
+10. `hold` 非 string → 拒绝；非 motion 类型出现 → 拒绝（`'hold' is only valid for type 'motion'`）；取值不是 `button` / `always` → 拒绝（`unknown hold '...'`）。
+11. 鼠标保留字 `MOUSE_LEFT_LOCKED` / `LEFT_CLICK_LOCKED` 的特殊分支：不允许 slide/motion（`cannot be a slide` / `cannot be a motion`）、不允许 `mode: toggle`、不允许 `depends_on`。
+12. `type: "motion"` 分支：不允许 `mode: toggle`；其余字段（`depends_on`、`hold`）允许。
+13. 其余键名走键表达式文法（第 5 节）；解析失败拒绝。**鼠标按键名也算单键**。
+14. `mode: toggle` 要求单键：组合键拒绝（`'mode: toggle' requires a single key, not a combo`）；slide 拒绝（`'mode: toggle' is not supported for slides`）。
+15. `depends_on` 与本条目的单键触发键相同 → 拒绝（`'...' depends on itself`）。
+16. slide：`key` 必须是单个键（组合键拒绝）；`dx`/`dy` 必须都是 number 且落在 `[-1,1]`；`duration_ms` 若存在必须是 number，然后夹取到 `[50,5000]`（夹取只告警，不拒绝）。
+17. 跨条目规则：slide 键不得同时作为某个组合键的成员，否则该 slide 条目被拒绝（`slide key '...' is also used in a combo`）。
 
 所有拒绝都会 `LOGW` 一行（含模板路径与条目下标），并计入该模板的失败统计：
 `sc_mapping_manager.last_load` 的 `fail` 计数与最多 16 条 `msgs` 文本，
@@ -94,9 +96,10 @@
   正常模板不会触发。
 - 滑动中的实时位置由 `nx + ndx * t`、`ny + ndy * t` 计算（`t ∈ [0,1]`），
   并在注入前夹到 `[0,1]`；所以 `dx`/`dy` 可以指向帧外，实际会被边界截断。
-- `motion` 条目的 `x`/`y` 是**起点 / 回绕重锚点**：按下任一鼠标键后第一次
-  产生位移时在该点注入 DOWN，之后按相对位移移动；越界回绕后再从该点重新
-  DOWN（见第 9 节）。
+- `motion` 条目的 `x`/`y` 是**起点 / 回绕重锚点**：默认（`hold: "button"`）
+  在按下任一鼠标键后第一次产生位移时在该点注入 DOWN，之后按相对位移移动；
+  越界回绕后再从该点重新 DOWN。`hold: "always"` 时在该点注入 DOWN 后不再
+  回绕，只在映射停止时 UP（见第 9 节）。
 
 ## 5. 组合键文法
 
@@ -206,9 +209,10 @@
 
 ### 7.3 保留字 `MOUSE_MOVE`
 
-鼠标位移映射（`type: "motion"`）。它不是按键、没有键码，只在**按住任意鼠标键
-（1..5）并移动鼠标**时驱动一条独立的滑动指针。字段与运行时见第 9 节。
-管理面板里按 `V` 可直接创建该条目。
+鼠标位移映射（`type: "motion"`）。它不是按键、没有键码，默认在**按住任意鼠标键
+（1..5）并移动鼠标**时驱动一条独立的滑动指针；写 `"hold": "always"` 后变成
+视角模式，不需要按住鼠标键，手指一直按住直到映射停止。字段与运行时见第 9 节。
+管理面板里按 `V` 可直接创建该条目，按 `H` 切换 hold。
 
 ## 8. 完整示例
 
@@ -230,7 +234,7 @@
     { "key": "e", "x": 0.2, "y": 0.9,
       "depends_on": "lshift", "depends_state": "pressed" },
     { "type": "motion", "key": "MOUSE_MOVE",
-      "x": 0.5, "y": 0.5, "sensitivity": 1.8 }
+      "x": 0.7, "y": 0.55, "sensitivity": 2.4, "hold": "always" }
   ]
 }
 ```
@@ -244,7 +248,7 @@
 - 第七条是左键锁定条目。
 - 第八条 `q` 是切换型：第一次按下注入 DOWN 并保持，再按一次注入 UP。
 - 第九条 `e` 只在 `lshift` 处于按下状态时生效。
-- 第十条把鼠标相对位移转成从屏幕中心开始的滑动，灵敏度 1.8。
+- 第十条是视角模式：虚拟手指锚定在画面右侧 `(0.7, 0.55)`，鼠标一动就按住并持续跟随鼠标位移，直到映射停止才抬起。
 
 ## 9. 鼠标位移映射（`type: "motion"`）
 
@@ -253,8 +257,9 @@
 | 字段 | 含义 |
 | --- | --- |
 | `key` | 固定为 `MOUSE_MOVE`（唯一允许的键）。 |
-| `x` / `y` | 起点 / 回绕重锚点，缺省 `0.5`/`0.5`。 |
+| `x` / `y` | 虚拟手指的起点（`hold: "button"` 时也是回绕重锚点），缺省 `0.5`/`0.5`。 |
 | `sensitivity` | 灵敏度，缺省 `1.0`，有效范围 `[0.05, 20.0]`。 |
+| `hold` | 手指保持方式：`"button"`（默认，按住鼠标键才按住手指）或 `"always"`（视角模式，手指永不抬起）。见 9.4。 |
 | `depends_on` / `depends_state` | 可选。依赖不满足时既不注入也不消费鼠标位移。 |
 
 换算公式（`motion_feed()`）：
@@ -272,7 +277,8 @@ dny = yrel * sensitivity / frame_height
 1. 模板里存在 `MOUSE_MOVE` 条目（唯一，重复键名会被加载拒绝）；
 2. 映射总开关 `enabled == true`；
 3. 已连接、未暂停、非设计模式、未打开 F2 切换弹窗 / F5 管理面板；
-4. 至少有一个鼠标键（1..5）处于物理按下状态；
+4. `hold` 为 `always` 时无按键门槛；为 `button`（默认）时至少有一个鼠标键
+   （1..5）处于物理按下状态；
 5. 条目依赖（若有）满足。
 
 参与时鼠标位移事件被**消费**，不再转发给设备，避免物理指针与合成滑动
@@ -286,27 +292,60 @@ dny = yrel * sensitivity / frame_height
 - **限流**：两次注入之间至少间隔 `8 ms`（`MOTION_MIN_INTERVAL_MS`），期间
   的位移累加（`pend_nx/pend_ny`），到点一次性注入累加值；不会把每个鼠标
   事件都塞进控制队列（队列上限 60 条）。
-- **DOWN 时机**：按住鼠标键后收到的第一条鼠标移动事件就注入 DOWN（在
-  `x`/`y`），即使该事件位移为 0；只按下不移动不会产生滑动。
-- **越界与回绕**：目标点越出 `[0,1]` 时，先在**夹取后的边界点**注入
-  `MOVE`，再在同一点注入 `UP`，然后回到 `x`/`y`（重锚点）注入 `DOWN`。
-  不使用“单条 MOVE 瞬移回起点”，因为设备会把它识别为反向 fling。
+- **DOWN 时机**：`hold: "button"` 时，按住鼠标键后收到的第一条鼠标移动事件
+  就注入 DOWN（在 `x`/`y`），即使该事件位移为 0；只按下不移动不会产生滑动。
+  `hold: "always"` 时，启用状态下收到的第一条鼠标移动事件注入 DOWN，此后
+  不再重复 DOWN，直到映射停止。
+- **越界与回绕**：`hold: "button"` 时，目标点越出 `[0,1]` 就先在**夹取后的
+  边界点**注入 `MOVE`，再在同一点注入 `UP`，然后回到 `x`/`y`（重锚点）注入
+  `DOWN`。不使用“单条 MOVE 瞬移回起点”，因为设备会把它识别为反向 fling。
   代价是每次回绕留下一个“轻点”痕迹（边界点 DOWN/UP 对），且回绕后位置
-  从重锚点重新开始。
-- **停止条件**：所有鼠标键松开；依赖丢失；`enabled=false`；`paused`；
-  连接断开；切模板 / 热重载 / 打开 F2 或 F5 面板 / 进入设计模式；窗口失焦；
-  程序退出。任一成立都会补 UP（`motion_stop()` / `mapping_release_all()`），
-  不留按住不放的残留。
+  从重锚点重新开始。`hold: "always"` 不做回绕：位置被硬夹在边界，手指始终
+  不抬起（原因见 9.4）。
+- **停止条件**：`hold: "button"` 时所有鼠标键松开即停；`hold: "always"` 时
+  只能靠下面这些事件停止。两种情况下的其余停止事件相同：依赖丢失；
+  `enabled=false`；`paused`；连接断开；切模板 / 热重载 / 打开 F2 或 F5
+  面板 / 进入设计模式；窗口失焦；程序退出。任一成立都会补 UP
+  （`motion_stop()` / `mapping_release_all()`），不留按住不放的残留。
 - **与现有滑动的关系**：`motion` 与 `slide` 各自持有独立指针 id，可以同时
   运行；二者都不与物理鼠标指针共用 id（只有 `SC_POINTER_ID_MOUSE` 转发时
   才用）。设备端 `MAX_POINTERS = 10`，同时按住的条目越多越容易触顶，这是
   与原有映射共有的限制。
 - **与虚拟鼠标（Alt+拖动）的关系**：参与位移映射时鼠标移动事件被消费，
-  虚拟鼠标的 `MOVE` 不再产生；松开所有鼠标键后恢复。这是“同一时刻只有
-  一个指针在动”的取舍，未做两路同时注入。
+  虚拟鼠标的 `MOVE` 不再产生；`hold: "button"` 下松开所有鼠标键、
+  `hold: "always"` 下映射停止后恢复。这是“同一时刻只有一个指针在动”的
+  取舍，未做两路同时注入。
 - **未验证项**：真机注入时序、边界回绕手感、与 `slide` 同时运行的观感、
   不同灵敏度下的体感，均未在真机验证（本仓库构建环境无法运行 Android
   设备注入）。上面描述的是代码路径，不是实测结果。
+
+### 9.4 视角模式（`hold: "always"`）
+
+用途：像在 PC 上玩 FPS 一样用鼠标直接转视角，而不是“按住鼠标拖动屏幕”。
+
+```json
+{ "type": "motion", "key": "MOUSE_MOVE", "x": 0.55, "y": 0.5,
+  "sensitivity": 2.4, "hold": "always" }
+```
+
+- **启用方式**：在 motion 条目里写 `"hold": "always"` 并加载模板即可，不需要
+  额外按键进入。管理面板（F5）里选中 `MOUSE_MOVE` 条目按 `H` 也能切换。
+- **无按键门槛**：不需要按住任何鼠标键；鼠标一动，虚拟手指就在 `x`/`y`
+  按下，并随鼠标位移连续移动。鼠标左/右/侧键仍然是普通可映射按键，可以和
+  视角模式同时使用（例如左键映射成开火）。
+- **只有停止才抬手**：运行期间只注入 DOWN 一次和持续 MOVE，不注入 UP；
+  因此设备侧看到的是“一根一直按在屏幕上的手指”。停止条件见 9.3，停止时
+  一定补 UP。
+- **边界是硬夹取**：手指到屏幕边缘后停在边缘，鼠标继续往同方向推不会再
+  产生位移。原因：单根手指的坐标被限制在屏幕内，若不抬手就无法“无限旋转”；
+  另外两种做法（到边界抬指回锚点、单条 MOVE 瞬移回锚点）分别会产生视角
+  跳变和被设备识别为反向 fling，因此没有采用。实际手感是“一次满屏拖动
+  能转多少度由 `sensitivity` 决定”，需要转更多圈时增大灵敏度或反向推动
+  鼠标让手指回到画面中部。
+- **与依赖共存**：`depends_on` 依然有效。依赖不满足时手指会被抬起，重新
+  满足后要等下一次鼠标移动才会再次按下（不会凭空产生按压）。
+- **未验证项**：真实游戏中视角旋转方向、灵敏度体感、夹取到边界后的玩家
+  感受均未验证；当前 `sensitivity` 只接受正数，没有反向轴 / 反转 Y 轴。
 
 ## 10. 切换型映射（`mode: "toggle"`）
 
@@ -343,6 +382,7 @@ dny = yrel * sensitivity / frame_height
 - 每个内存条目都写出：`key`、`x`、`y`；
 - `type == slide` 时额外写 `"type": "slide"`、`dx`、`dy`、`duration_ms`；
 - `type == motion` 时写 `"type": "motion"` 与 `sensitivity`（总是写，缺省 1.0）；
+- `hold` 仅在值为 `always` 时写 `"hold": "always"`（默认 `button` 不写）；
 - `mode` 仅在值为 `toggle` 时写 `"mode": "toggle"`（默认 `momentary` 不写）；
 - 依赖仅在存在时写 `depends_on`（用 `sc_mapping_key_name()` 输出规范名）与
   `depends_state`（`pressed` / `released`，总是写）；
@@ -353,7 +393,7 @@ dny = yrel * sensitivity / frame_height
 （`x`/`y`/`dx`/`dy`/`sensitivity` 为 `double`，cJSON 默认以 `%1.15g` 输出，
 若 15 位精度不足以无损往返则回退到 `%1.17g`，因此数值往返无损；
 `duration_ms` 为整数）。新增的可选字段全部参与往返：`mode`、`depends_on`、
-`depends_state`、`sensitivity`、`type: motion` 加载后保存不会丢失。
+`depends_state`、`sensitivity`、`hold`、`type: motion` 加载后保存不会丢失。
 
 注意两点：
 
@@ -401,6 +441,9 @@ dny = yrel * sensitivity / frame_height
 | `sensitivity` 非数字 | 该条拒绝：`'sensitivity' must be a number`。 |
 | `sensitivity` 出现在非 motion 条目 | 该条拒绝：`'sensitivity' is only valid for type 'motion'`。 |
 | `sensitivity` 越界 | 夹取到 `[0.05,20.0]` 并告警，条目保留。 |
+| `hold` 非字符串 | 该条拒绝：`'hold' must be a string`。 |
+| `hold` 出现在非 motion 条目 | 该条拒绝：`'hold' is only valid for type 'motion'`。 |
+| `hold` 取值未知 | 该条拒绝：`unknown hold '...'`。 |
 | slide 缺 `dx`/`dy` 或非数字 | 该条拒绝：`slide requires numeric 'dx' and 'dy'`。 |
 | slide `dx`/`dy` 越界 `[-1,1]` | 该条拒绝。 |
 | slide 用组合键 | 该条拒绝。 |
@@ -422,6 +465,7 @@ toggle 用于非单键 touch、依赖为组合键或依赖自身、灵敏度仅 
 
 面板按键：`1`-`6` 编辑字段、`Enter` 提交、`N` 新建（再按一个键）、
 `V` 新建 `MOUSE_MOVE`、`T` 切换 touch/slide、`M` 切换 momentary/toggle、
+`H` 切换 hold（`button` / `always`，仅 motion）、
 `D` 循环依赖（无 → 按键捕获 pressed → released → 无）、`S` 保存。
 面板编辑只改内存，按 `S`（或关闭面板时若脏）才写回文件。
 

@@ -359,19 +359,20 @@ motion_start(struct sc_input_manager *im, struct sc_mapping_entry *e) {
     }
 }
 
-// Convert the mouse delta of one event into a normalized swipe move.
-// Returns true when the event was consumed by the motion mapping: either it is
-// actively driving the swipe, or a motion entry exists while a mouse button is
-// held (in that case the physical pointer must not be forwarded at the same
-// time, otherwise two pointers move the device cursor at once).
+// Convert the mouse delta of one event into the movement of the synthetic
+// finger. Returns true when the event was consumed by the motion mapping:
+// either it is actively driving the finger, or a motion entry exists while a
+// mouse button is held (in that case the physical pointer must not be forwarded
+// at the same time, otherwise two pointers move the device cursor at once).
 static bool
 motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
     struct sc_mapping_manager *mm = mm_of(im);
     struct sc_mapping_entry *e = find_motion_entry(mm);
+    bool latched = e && e->hold == SC_MOTION_HOLD_ALWAYS;
     bool engaged = e && mm->enabled && im->controller
                 && !im->screen->paused && !im->disconnected
                 && !im->design_mode && !im->switch_open
-                && motion_any_button_down(im);
+                && (latched || motion_any_button_down(im));
     if (!engaged || !dep_ok(im, e)) {
         motion_stop(im);
         return false;
@@ -402,6 +403,19 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
 
     double tx = im->motion.cur_nx + dnx;
     double ty = im->motion.cur_ny + dny;
+    if (latched) {
+        // Look mode: the finger must never lift while the mode is on, so the
+        // boundary is a hard clamp instead of a wrap. Keeping the position
+        // clamped (and not an unbounded internal position) means moving the
+        // mouse back rotates immediately, with no dead zone. The limit is
+        // physical: a single never-lifting finger cannot rotate forever.
+        im->motion.cur_nx = clamp01(tx);
+        im->motion.cur_ny = clamp01(ty);
+        inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, im->motion.cur_nx,
+                          im->motion.cur_ny, im->motion.pointer_id);
+        return true;
+    }
+
     if (tx < 0.0 || tx > 1.0 || ty < 0.0 || ty > 1.0) {
         // Boundary: clamp the injected point, then wrap by closing the stroke
         // (UP at the edge) and reopening it at the anchor (DOWN). A single
@@ -695,12 +709,13 @@ manager_apply(struct sc_input_manager *im, struct sc_mapping_entry *e,
               double nx, double ny, double ndx, double ndy, int duration_ms,
               enum sc_mapping_mode mode, SDL_Keycode dep_key,
               enum sc_mapping_dep dep, double sensitivity,
-              char *err, size_t errlen) {
+              enum sc_motion_hold hold, char *err, size_t errlen) {
     const char *dep_name = dep == SC_MAPPING_DEP_NONE
                          ? NULL : sc_mapping_key_name(dep_key);
     return sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, e->type,
                                         nx, ny, ndx, ndy, duration_ms, mode,
-                                        dep_name, dep, sensitivity, err, errlen);
+                                        dep_name, dep, sensitivity, hold,
+                                        err, errlen);
 }
 
 static void
@@ -709,7 +724,7 @@ manager_set_dep(struct sc_input_manager *im, struct sc_mapping_entry *e,
     struct sc_overlay *ov = ov_of(im);
     char err[128];
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       e->mode, dep_key, dep, e->sensitivity,
+                       e->mode, dep_key, dep, e->sensitivity, e->hold,
                        err, sizeof(err))) {
         char msg[192];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -854,7 +869,7 @@ manager_commit_edit(struct sc_input_manager *im) {
 
     char err[128];
     if (!manager_apply(im, e, nx, ny, ndx, ndy, dur, e->mode, e->dep_key,
-                       e->dep, sens, err, sizeof(err))) {
+                       e->dep, sens, e->hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -884,7 +899,8 @@ manager_create_entry(struct sc_input_manager *im, const char *key_name) {
         ? manager_apply(im, existing, nx, ny, existing->ndx, existing->ndy,
                         existing->duration_ms, existing->mode,
                         existing->dep_key, existing->dep,
-                        existing->sensitivity, err, sizeof(err))
+                        existing->sensitivity, existing->hold,
+                        err, sizeof(err))
         : sc_mapping_manager_upsert(mm, key_name, SC_MAPPING_TYPE_TOUCH,
                                     nx, ny, 0.0, 0.0, 0, err, sizeof(err));
     if (!ok) {
@@ -921,6 +937,7 @@ manager_create_motion(struct sc_input_manager *im) {
                                       0.0, 0.0, 0, SC_MAPPING_MODE_MOMENTARY,
                                       NULL, SC_MAPPING_DEP_NONE,
                                       SC_MAPPING_SENSITIVITY_DEFAULT,
+                                      SC_MOTION_HOLD_BUTTON,
                                       err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1027,7 +1044,7 @@ manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
     }
     char err[128];
     if (!manager_apply(im, e, x, y, dx, dy, e->duration_ms, e->mode,
-                       e->dep_key, e->dep, e->sensitivity,
+                       e->dep_key, e->dep, e->sensitivity, e->hold,
                        err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1056,7 +1073,7 @@ manager_toggle_mode(struct sc_input_manager *im) {
                               : SC_MAPPING_MODE_TOGGLE;
     char err[128];
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       mode, e->dep_key, e->dep, e->sensitivity,
+                       mode, e->dep_key, e->dep, e->sensitivity, e->hold,
                        err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1066,6 +1083,38 @@ manager_toggle_mode(struct sc_input_manager *im) {
     sc_overlay_manager_set_hint(ov, mode == SC_MAPPING_MODE_TOGGLE
         ? "Mode: toggle (press S to save)"
         : "Mode: momentary (press S to save)");
+}
+
+// H flips the finger lifetime of the MOUSE_MOVE entry:
+// button-gated drag <-> latched look mode.
+static void
+manager_toggle_hold(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    if (e->type != SC_MAPPING_TYPE_MOTION) {
+        sc_overlay_manager_set_hint(ov,
+            "hold needs the MOUSE_MOVE motion entry (press V)");
+        return;
+    }
+    enum sc_motion_hold hold = e->hold == SC_MOTION_HOLD_ALWAYS
+                             ? SC_MOTION_HOLD_BUTTON
+                             : SC_MOTION_HOLD_ALWAYS;
+    char err[128];
+    if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
+                       e->mode, e->dep_key, e->dep, e->sensitivity, hold,
+                       err, sizeof(err))) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        return;
+    }
+    sc_overlay_manager_set_hint(ov, hold == SC_MOTION_HOLD_ALWAYS
+        ? "Hold: always / look mode (press S to save)"
+        : "Hold: while a button is down (press S to save)");
 }
 
 // D cycles: no dependency -> capture key (pressed) -> released -> none.
@@ -1195,6 +1244,9 @@ manager_handle_key(struct sc_input_manager *im, SDL_Keycode kc) {
         return true;
     case SDLK_V:
         manager_create_motion(im);
+        return true;
+    case SDLK_H:
+        manager_toggle_hold(im);
         return true;
     case SDLK_N:
         ov->mgr_capture_key = true;
