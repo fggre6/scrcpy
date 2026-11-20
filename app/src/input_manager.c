@@ -1002,6 +1002,7 @@ manager_toggle_type(struct sc_input_manager *im) {
                                       e->dep == SC_MAPPING_DEP_NONE ? NULL
                                           : sc_mapping_key_name(e->dep_key),
                                       e->dep, e->sensitivity,
+                                      SC_MOTION_HOLD_BUTTON,
                                       err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
