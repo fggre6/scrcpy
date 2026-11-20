@@ -1186,6 +1186,21 @@ void
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     // Apply debounced template switches (no file I/O from mouse callbacks)
     sc_mapping_manager_tick(&screen->mm);
+    // #region debug-point A:motion-pending-on-video-frame
+    if (event->type == SC_EVENT_NEW_FRAME && screen->im.motion.active
+            && (screen->im.motion.pend_nx != 0.0
+                || screen->im.motion.pend_ny != 0.0)
+            && sc_tick_now() - screen->im.motion.last_inject
+               >= SC_TICK_FROM_MS(8)) {
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+             "hypothesisId=A location=screen.c:sc_screen_handle_event "
+             "msg=overdue-motion-pending-on-video-frame now=%" PRItick
+             " elapsed_us=%" PRItick " pend_nx=%f pend_ny=%f",
+             sc_tick_now(),
+             SC_TICK_TO_US(sc_tick_now() - screen->im.motion.last_inject),
+             screen->im.motion.pend_nx, screen->im.motion.pend_ny);
+    }
+    // #endregion
     // Advance running slides (main-loop driven, no detached thread)
     sc_input_manager_tick(&screen->im);
 

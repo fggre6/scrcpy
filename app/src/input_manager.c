@@ -252,21 +252,6 @@ sc_input_manager_tick(struct sc_input_manager *im) {
         motion_stop(im);
     }
 
-    // #region debug-point A:motion-pending-at-tick
-    if (im->motion.active
-            && (im->motion.pend_nx != 0.0 || im->motion.pend_ny != 0.0)
-            && sc_tick_now() - im->motion.last_inject
-               >= SC_TICK_FROM_MS(8)) {
-        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
-             "hypothesisId=A location=input_manager.c:sc_input_manager_tick "
-             "msg=overdue-motion-pending-at-tick now=%" PRItick
-             " elapsed_us=%" PRItick " pend_nx=%f pend_ny=%f",
-             sc_tick_now(),
-             SC_TICK_TO_US(sc_tick_now() - im->motion.last_inject),
-             im->motion.pend_nx, im->motion.pend_ny);
-    }
-    // #endregion
-
     bool any = false;
     for (int i = 0; i < SC_MAX_SLIDES; i++) {
         if (im->slides[i].active) {

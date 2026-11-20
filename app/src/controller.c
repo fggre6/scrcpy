@@ -124,10 +124,13 @@ sc_controller_push_msg(struct sc_controller *controller,
 
     // #region debug-point C:control-queue-drop
     if (!pushed && sc_control_msg_is_droppable(msg)) {
+        int touch_action = msg->type == SC_CONTROL_MSG_TYPE_INJECT_TOUCH_EVENT
+            ? msg->inject_touch_event.action : -1;
         LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
              "hypothesisId=C location=controller.c:sc_controller_push_msg "
-             "msg=control-message-dropped type=%d queue_size=%zu",
-             (int) msg->type, size);
+             "msg=control-message-dropped type=%d touch_action=%d "
+             "queue_size=%zu",
+             (int) msg->type, touch_action, size);
     }
     // #endregion
 
