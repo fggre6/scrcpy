@@ -307,6 +307,28 @@ sc_mapping_key_name(SDL_Keycode kc) {
     return "Unknown";
 }
 
+// Render a dependency key set back into a "A+B+C" expression. Used to round-trip
+// a combo dependency through upsert_ex (which takes a name string).
+const char *
+sc_mapping_dep_keys_to_name(const SDL_Keycode *keys, int nkeys, char *buf,
+                             size_t buflen) {
+    if (nkeys <= 0 || !buf || buflen == 0) return NULL;
+    size_t off = 0;
+    for (int i = 0; i < nkeys && off < buflen - 1; i++) {
+        const char *n = sc_mapping_key_name(keys[i]);
+        int nlen = (int) strlen(n);
+        if (i > 0) {
+            if (off < buflen - 1) buf[off++] = '+';
+        }
+        int copy = nlen;
+        if (off + copy >= buflen) copy = (int) (buflen - 1 - off);
+        if (copy > 0) memcpy(buf + off, n, (size_t) copy);
+        off += (size_t) copy;
+    }
+    buf[off] = '\0';
+    return buf;
+}
+
 // ============================================================
 // Key expression grammar
 // ============================================================
@@ -660,8 +682,32 @@ parse_template(const char *path, struct sc_parse_out *out) {
             continue;
         }
 
-        // x/y: required for touch and slide. For motion they are optional and
-        // only define the re-anchor point (default: screen center).
+        // "virtual": a logical key with no touch injection. It only tracks
+        // press/release (or toggle) state so other entries can depend on it or
+        // include it in a combo. x/y are ignored and not required.
+        bool is_virtual = false;
+        cJSON *jvirt = cJSON_GetObjectItemCaseSensitive(item, "virtual");
+        if (jvirt) {
+            if (!cJSON_IsBool(jvirt)) {
+                stat_fail(&out->stats, path, i, "'virtual' must be a boolean");
+                continue;
+            }
+            is_virtual = cJSON_IsTrue(jvirt);
+            if (is_virtual && (motion_name || is_mouse_name(key_name))) {
+                stat_fail(&out->stats, path, i,
+                          "reserved names cannot be virtual");
+                continue;
+            }
+            if (is_virtual && type != SC_MAPPING_TYPE_TOUCH) {
+                stat_fail(&out->stats, path, i,
+                          "virtual keys only support type 'touch'");
+                continue;
+            }
+        }
+
+        // x/y: required for touch and slide (unless virtual). For motion they
+        // are optional and only define the re-anchor point (default: screen
+        // center). For virtual keys x/y are accepted but never used.
         cJSON *jx = cJSON_GetObjectItemCaseSensitive(item, "x");
         cJSON *jy = cJSON_GetObjectItemCaseSensitive(item, "y");
         double nx = 0.5;
@@ -680,9 +726,67 @@ parse_template(const char *path, struct sc_parse_out *out) {
             stat_fail(&out->stats, path, i,
                       "'x'/'y' must both be numbers");
             continue;
-        } else if (type != SC_MAPPING_TYPE_MOTION) {
+        } else if (type != SC_MAPPING_TYPE_MOTION && !is_virtual) {
             stat_fail(&out->stats, path, i, "missing or invalid 'x'/'y'");
             continue;
+        }
+
+        // "positions": optional array of [x, y] pairs for multi-touch. The
+        // primary position (x/y above) is index 0; these are the extras.
+        // Virtual keys ignore positions (they have no screen presence).
+        int npositions = 1;
+        double extra_nx[SC_MAPPING_MAX_POSITIONS - 1] = { 0 };
+        double extra_ny[SC_MAPPING_MAX_POSITIONS - 1] = { 0 };
+        cJSON *jpos = cJSON_GetObjectItemCaseSensitive(item, "positions");
+        if (jpos) {
+            if (is_virtual) {
+                stat_fail(&out->stats, path, i,
+                          "virtual keys cannot have 'positions'");
+                continue;
+            }
+            if (!cJSON_IsArray(jpos)) {
+                stat_fail(&out->stats, path, i, "'positions' must be an array");
+                continue;
+            }
+            int np = cJSON_GetArraySize(jpos);
+            if (np > SC_MAPPING_MAX_POSITIONS - 1) {
+                snprintf(err, sizeof(err),
+                         "too many positions (%d > %d extras)",
+                         np, SC_MAPPING_MAX_POSITIONS - 1);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
+            bool ok = true;
+            for (int p = 0; p < np; p++) {
+                cJSON *pair = cJSON_GetArrayItem(jpos, p);
+                if (!cJSON_IsArray(pair) || cJSON_GetArraySize(pair) != 2) {
+                    stat_fail(&out->stats, path, i,
+                              "each position must be a [x, y] pair");
+                    ok = false;
+                    break;
+                }
+                cJSON *px = cJSON_GetArrayItem(pair, 0);
+                cJSON *py = cJSON_GetArrayItem(pair, 1);
+                if (!cJSON_IsNumber(px) || !cJSON_IsNumber(py)) {
+                    stat_fail(&out->stats, path, i,
+                              "position coordinates must be numbers");
+                    ok = false;
+                    break;
+                }
+                double vx = px->valuedouble;
+                double vy = py->valuedouble;
+                if (vx < 0.0 || vx > 1.0 || vy < 0.0 || vy > 1.0) {
+                    snprintf(err, sizeof(err),
+                             "position out of range [0,1] (%f, %f)", vx, vy);
+                    stat_fail(&out->stats, path, i, err);
+                    ok = false;
+                    break;
+                }
+                extra_nx[p] = vx;
+                extra_ny[p] = vy;
+            }
+            if (!ok) continue;
+            npositions = np + 1;
         }
 
         // mode (optional, defaults to "momentary")
@@ -705,10 +809,13 @@ parse_template(const char *path, struct sc_parse_out *out) {
             }
         }
 
-        // dependency (optional): "depends_on" is a single key / mouse button,
-        // "depends_state" is "pressed" (default) or "released".
+        // dependency (optional): "depends_on" is a single key, a mouse button
+        // or a combo ("A+B"); "depends_state" is "pressed" (default) or
+        // "released". A combo dependency is satisfied when every member is
+        // held (equivalent to depending on a virtual combo entry).
         enum sc_mapping_dep dep = SC_MAPPING_DEP_NONE;
-        SDL_Keycode dep_key = 0;
+        SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS] = { 0 };
+        int dep_nkeys = 0;
         cJSON *jdep = cJSON_GetObjectItemCaseSensitive(item, "depends_on");
         cJSON *jdepstate = cJSON_GetObjectItemCaseSensitive(item,
                                                            "depends_state");
@@ -719,15 +826,8 @@ parse_template(const char *path, struct sc_parse_out *out) {
                           "missing or invalid 'depends_on'");
                 continue;
             }
-            if (strchr(jdep->valuestring, '+')) {
-                stat_fail(&out->stats, path, i,
-                          "dependency must be a single key, not a combo");
-                continue;
-            }
-            dep_key = sc_mapping_parse_key_name(jdep->valuestring);
-            if (dep_key == SDLK_UNKNOWN) {
-                snprintf(err, sizeof(err), "unknown dependency key '%s'",
-                         jdep->valuestring);
+            if (!parse_key_expr(jdep->valuestring, dep_keys, &dep_nkeys,
+                                err, sizeof(err))) {
                 stat_fail(&out->stats, path, i, err);
                 continue;
             }
@@ -839,9 +939,11 @@ parse_template(const char *path, struct sc_parse_out *out) {
             }
             e->nkeys = 0;
             e->is_mouse = true;
+            e->is_virtual = false;
             e->type = SC_MAPPING_TYPE_TOUCH;
             e->nx = nx;
             e->ny = ny;
+            e->npositions = 1;
             e->duration_ms = 0;
             e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
             out->count++;
@@ -863,13 +965,16 @@ parse_template(const char *path, struct sc_parse_out *out) {
                 continue;
             }
             e->nkeys = 0;
+            e->is_virtual = false;
             e->type = SC_MAPPING_TYPE_MOTION;
             e->nx = nx;
             e->ny = ny;
+            e->npositions = 1;
             e->sensitivity = sensitivity;
             e->hold = hold;
             e->dep = dep;
-            e->dep_key = dep_key;
+            memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
+            e->dep_nkeys = dep_nkeys;
             out->count++;
             out->stats.ok++;
             continue;
@@ -901,10 +1006,19 @@ parse_template(const char *path, struct sc_parse_out *out) {
             stat_fail(&out->stats, path, i, err);
             continue;
         }
-        if (dep != SC_MAPPING_DEP_NONE && nkeys == 1 && dep_key == keys[0]) {
-            snprintf(err, sizeof(err), "'%s' depends on itself", key_name);
-            stat_fail(&out->stats, path, i, err);
-            continue;
+        if (dep != SC_MAPPING_DEP_NONE && nkeys == 1) {
+            bool self_dep = false;
+            for (int di = 0; di < dep_nkeys; di++) {
+                if (dep_keys[di] == keys[0]) {
+                    self_dep = true;
+                    break;
+                }
+            }
+            if (self_dep) {
+                snprintf(err, sizeof(err), "'%s' depends on itself", key_name);
+                stat_fail(&out->stats, path, i, err);
+                continue;
+            }
         }
 
         if (type == SC_MAPPING_TYPE_SLIDE) {
@@ -950,15 +1064,18 @@ parse_template(const char *path, struct sc_parse_out *out) {
             }
             memcpy(e->keys, keys, sizeof(keys));
             e->nkeys = nkeys;
+            e->is_virtual = false;
             e->type = SC_MAPPING_TYPE_SLIDE;
             e->nx = nx;
             e->ny = ny;
+            e->npositions = 1;
             e->ndx = ndx;
             e->ndy = ndy;
             e->duration_ms = duration_ms;
             e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
             e->dep = dep;
-            e->dep_key = dep_key;
+            memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
+            e->dep_nkeys = dep_nkeys;
             out->count++;
             out->stats.ok++;
             continue;
@@ -972,14 +1089,21 @@ parse_template(const char *path, struct sc_parse_out *out) {
         }
         memcpy(e->keys, keys, sizeof(keys));
         e->nkeys = nkeys;
+        e->is_virtual = is_virtual;
         e->type = SC_MAPPING_TYPE_TOUCH;
         e->mode = mode;
-        e->nx = nx;
-        e->ny = ny;
+        e->nx = is_virtual ? 0.0 : nx;
+        e->ny = is_virtual ? 0.0 : ny;
+        e->npositions = is_virtual ? 1 : npositions;
+        if (!is_virtual) {
+            memcpy(e->extra_nx, extra_nx, sizeof(extra_nx));
+            memcpy(e->extra_ny, extra_ny, sizeof(extra_ny));
+        }
         e->duration_ms = 0;
         e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
         e->dep = dep;
-        e->dep_key = dep_key;
+        memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
+        e->dep_nkeys = dep_nkeys;
         out->count++;
         out->stats.ok++;
     }
@@ -1055,7 +1179,12 @@ commit_entries(struct sc_mapping_manager *mm, struct sc_parse_out *out) {
 
     for (int i = 0; i < out->count && i < SC_MAPPING_MAX_ENTRIES; i++) {
         mm->entries[i] = out->entries[i]; // ownership transfer
-        mm->entries[i].pointer_id = acquire_pid(mm);
+        if (!mm->entries[i].is_virtual) {
+            mm->entries[i].pointer_id = acquire_pid(mm);
+            for (int p = 0; p < mm->entries[i].npositions - 1; p++) {
+                mm->entries[i].extra_pid[p] = acquire_pid(mm);
+            }
+        }
         mm->entries[i].down = false;
         mm->entries[i].active = false;
         out->entries[i].key_name = NULL; // transferred
@@ -1085,8 +1214,26 @@ save_active_impl(struct sc_mapping_manager *mm, bool force) {
         if (!e->key_name) continue;
         cJSON *item = cJSON_CreateObject();
         cJSON_AddStringToObject(item, "key", e->key_name);
-        cJSON_AddNumberToObject(item, "x", e->nx);
-        cJSON_AddNumberToObject(item, "y", e->ny);
+        // Virtual keys have no screen position: omit x/y entirely.
+        if (!e->is_virtual) {
+            cJSON_AddNumberToObject(item, "x", e->nx);
+            cJSON_AddNumberToObject(item, "y", e->ny);
+            // Extra multi-touch positions
+            if (e->npositions > 1) {
+                cJSON *pos = cJSON_CreateArray();
+                for (int p = 0; p < e->npositions - 1; p++) {
+                    cJSON *pair = cJSON_CreateArray();
+                    cJSON_AddItemToArray(pair,
+                                         cJSON_CreateNumber(e->extra_nx[p]));
+                    cJSON_AddItemToArray(pair,
+                                         cJSON_CreateNumber(e->extra_ny[p]));
+                    cJSON_AddItemToArray(pos, pair);
+                }
+                cJSON_AddItemToObject(item, "positions", pos);
+            }
+        } else {
+            cJSON_AddBoolToObject(item, "virtual", true);
+        }
         if (e->type == SC_MAPPING_TYPE_SLIDE) {
             cJSON_AddStringToObject(item, "type", "slide");
             cJSON_AddNumberToObject(item, "dx", e->ndx);
@@ -1105,9 +1252,11 @@ save_active_impl(struct sc_mapping_manager *mm, bool force) {
         if (e->mode == SC_MAPPING_MODE_TOGGLE) {
             cJSON_AddStringToObject(item, "mode", "toggle");
         }
-        if (e->dep != SC_MAPPING_DEP_NONE) {
-            cJSON_AddStringToObject(item, "depends_on",
-                                    sc_mapping_key_name(e->dep_key));
+        if (e->dep != SC_MAPPING_DEP_NONE && e->dep_nkeys > 0) {
+            char depname[128];
+            sc_mapping_dep_keys_to_name(e->dep_keys, e->dep_nkeys, depname,
+                                        sizeof(depname));
+            cJSON_AddStringToObject(item, "depends_on", depname);
             cJSON_AddStringToObject(item, "depends_state",
                                     e->dep == SC_MAPPING_DEP_RELEASED
                                         ? "released" : "pressed");
@@ -1425,7 +1574,7 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
                                         duration_ms, SC_MAPPING_MODE_MOMENTARY,
                                         NULL, SC_MAPPING_DEP_NONE,
                                         SC_MAPPING_SENSITIVITY_DEFAULT,
-                                        SC_MOTION_HOLD_BUTTON,
+                                        SC_MOTION_HOLD_BUTTON, false,
                                         err, errlen);
 }
 
@@ -1436,6 +1585,7 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
                              enum sc_mapping_mode mode,
                              const char *dep_name, enum sc_mapping_dep dep,
                              double sensitivity, enum sc_motion_hold hold,
+                             bool is_virtual,
                              char *err, size_t errlen) {
     if (!key_name || !*key_name) {
         ERR_MSG("empty key name");
@@ -1444,6 +1594,21 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
 
     bool is_mouse = is_mouse_name(key_name);
     bool is_motion = is_motion_name(key_name);
+
+    // A virtual key performs no injection: it only tracks logical state so it
+    // can be depended on or used as a combo member. Position, type (beyond
+    // touch) and pointer id are meaningless for it.
+    if (is_virtual) {
+        if (is_mouse || is_motion) {
+            ERR_MSG("'%s' cannot be a virtual key", key_name);
+            return false;
+        }
+        if (type != SC_MAPPING_TYPE_TOUCH) {
+            ERR_MSG("virtual keys only support type 'touch'");
+            return false;
+        }
+        type = SC_MAPPING_TYPE_TOUCH;
+    }
 
     // Type / key consistency (same rules as the JSON loader).
     if (is_motion && type != SC_MAPPING_TYPE_MOTION) {
@@ -1466,7 +1631,7 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
         ERR_MSG("'mode: toggle' is not supported for this entry");
         return false;
     }
-    if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) {
+    if (!is_virtual && (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0)) {
         ERR_MSG("'x'/'y' out of range [0,1]");
         return false;
     }
@@ -1489,26 +1654,25 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
         return false;
     }
 
-    // Dependency: a single key (mouse buttons allowed), never the entry's own
-    // single trigger key.
-    SDL_Keycode dep_key = 0;
+    // Dependency: a single key or a combo (mouse buttons allowed), never the
+    // entry's own single trigger key.
+    SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS] = { 0 };
+    int dep_nkeys = 0;
     if (dep != SC_MAPPING_DEP_NONE) {
         if (!dep_name || !*dep_name) {
             ERR_MSG("empty dependency key");
             return false;
         }
-        if (strchr(dep_name, '+')) {
-            ERR_MSG("dependency must be a single key, not a combo");
+        if (!parse_key_expr(dep_name, dep_keys, &dep_nkeys, err, errlen)) {
             return false;
         }
-        dep_key = sc_mapping_parse_key_name(dep_name);
-        if (dep_key == SDLK_UNKNOWN) {
-            ERR_MSG("unknown dependency key '%s'", dep_name);
-            return false;
-        }
-        if (nkeys == 1 && dep_key == keys[0]) {
-            ERR_MSG("'%s' depends on itself", key_name);
-            return false;
+        if (nkeys == 1) {
+            for (int i = 0; i < dep_nkeys; i++) {
+                if (dep_keys[i] == keys[0]) {
+                    ERR_MSG("'%s' depends on itself", key_name);
+                    return false;
+                }
+            }
         }
     }
 
@@ -1579,7 +1743,9 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
             return false;
         }
         strcpy(e->key_name, key_name);
-        e->pointer_id = acquire_pid(mm);
+        if (!is_virtual) {
+            e->pointer_id = acquire_pid(mm);
+        }
         mm->count++;
     } else if (e->active || e->down) {
         // Editing a live entry must not leave a finger pressed with the old
@@ -1592,10 +1758,12 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
     memcpy(e->keys, keys, sizeof(keys));
     e->nkeys = (is_mouse || is_motion) ? 0 : nkeys;
     e->is_mouse = is_mouse;
+    e->is_virtual = is_virtual;
     e->type = type;
     e->mode = (is_mouse || is_motion) ? SC_MAPPING_MODE_MOMENTARY : mode;
-    e->nx = nx;
-    e->ny = ny;
+    e->nx = is_virtual ? 0.0 : nx;
+    e->ny = is_virtual ? 0.0 : ny;
+    e->npositions = 1; // upsert_ex only creates single-position entries
     e->ndx = (type == SC_MAPPING_TYPE_SLIDE) ? ndx : 0.0;
     e->ndy = (type == SC_MAPPING_TYPE_SLIDE) ? ndy : 0.0;
     e->duration_ms = e->type == SC_MAPPING_TYPE_SLIDE ? duration_ms : 0;
@@ -1604,7 +1772,8 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
     e->hold = e->type == SC_MAPPING_TYPE_MOTION ? hold
                                                 : SC_MOTION_HOLD_BUTTON;
     e->dep = is_mouse ? SC_MAPPING_DEP_NONE : dep;
-    e->dep_key = dep_key;
+    memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
+    e->dep_nkeys = is_mouse ? 0 : dep_nkeys;
     e->down = false;
     e->active = false;
 
@@ -1618,8 +1787,10 @@ sc_mapping_manager_key_is_dependency(struct sc_mapping_manager *mm,
                                      SDL_Keycode kc) {
     for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
         struct sc_mapping_entry *e = &mm->entries[i];
-        if (e->key_name && e->dep != SC_MAPPING_DEP_NONE && e->dep_key == kc) {
-            return true;
+        if (e->key_name && e->dep != SC_MAPPING_DEP_NONE) {
+            for (int j = 0; j < e->dep_nkeys; j++) {
+                if (e->dep_keys[j] == kc) return true;
+            }
         }
     }
     return false;
@@ -1636,6 +1807,9 @@ sc_mapping_manager_remove_entry(struct sc_mapping_manager *mm,
         mm->release_hook(mm->release_opaque);
     }
     release_pid(mm, e->pointer_id);
+    for (int i = 0; i < e->npositions - 1; i++) {
+        release_pid(mm, e->extra_pid[i]);
+    }
     entry_clear(e);
     recount(mm);
     refresh_mouse_indices(mm);
@@ -1708,9 +1882,12 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
     struct sc_mapping_entry *old = find_by_name_impl(mm, key_name);
     enum sc_mapping_mode mode = old ? old->mode : SC_MAPPING_MODE_MOMENTARY;
     enum sc_mapping_dep dep = old ? old->dep : SC_MAPPING_DEP_NONE;
-    SDL_Keycode dep_key = old ? old->dep_key : 0;
+    int dep_nkeys = old ? old->dep_nkeys : 0;
+    SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS] = { 0 };
+    if (old) memcpy(dep_keys, old->dep_keys, sizeof(dep_keys));
     double sensitivity = old ? old->sensitivity : SC_MAPPING_SENSITIVITY_DEFAULT;
     enum sc_motion_hold hold = old ? old->hold : SC_MOTION_HOLD_BUTTON;
+    bool is_virtual = old ? old->is_virtual : false;
     if (type == SC_MAPPING_TYPE_SLIDE) {
         mode = SC_MAPPING_MODE_MOMENTARY; // toggle is not valid for slides
     }
@@ -1718,12 +1895,19 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
         hold = SC_MOTION_HOLD_BUTTON;
     }
 
+    // Rebuild the dependency name string (single key or combo) for upsert_ex.
+    char dep_name_buf[128] = { 0 };
+    const char *dep_name = NULL;
+    if (dep != SC_MAPPING_DEP_NONE && dep_nkeys > 0) {
+        dep_name = sc_mapping_dep_keys_to_name(dep_keys, dep_nkeys, dep_name_buf,
+                                               sizeof(dep_name_buf));
+    }
+
     bool ok = sc_mapping_manager_upsert_ex(mm, key_name, type,
                                            mm->design_nx, mm->design_ny,
                                            ndx, ndy, duration, mode,
-                                           dep == SC_MAPPING_DEP_NONE ? NULL
-                                               : sc_mapping_key_name(dep_key),
-                                           dep, sensitivity, hold,
+                                           dep_name, dep, sensitivity, hold,
+                                           is_virtual,
                                            err, sizeof(err));
     if (ok) {
         sc_mapping_manager_design_reset(mm);

@@ -90,11 +90,19 @@ inject_touch_norm(struct sc_input_manager *im,
     return false;
 }
 
-// Inject a touch for a mapping entry (uses its normalized coords)
+// Inject a touch for a mapping entry (uses its normalized coords). For
+// multi-position entries every finger is pressed / lifted at once.
 static bool
 inject_entry(struct sc_input_manager *im, struct sc_mapping_entry *e,
              enum android_motionevent_action action) {
-    return inject_touch_norm(im, action, e->nx, e->ny, e->pointer_id);
+    bool ok = inject_touch_norm(im, action, e->nx, e->ny, e->pointer_id);
+    for (int p = 0; p < e->npositions - 1; p++) {
+        if (!inject_touch_norm(im, action, e->extra_nx[p], e->extra_ny[p],
+                               e->extra_pid[p])) {
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 // ==================== 滑动（hold-to-slide） ====================
@@ -485,8 +493,32 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
 
 // ==================== 映射激活 / 依赖 ====================
 
+// Render an entry's dependency key set as "A+B+C" for log messages. The
+// manager-side helper is static, so keep a tiny local copy.
+static void
+dep_keys_to_name_log(const struct sc_mapping_entry *e, char *buf,
+                     size_t buflen) {
+    buf[0] = '\0';
+    if (!e || e->dep_nkeys <= 0 || buflen == 0) return;
+    size_t off = 0;
+    for (int i = 0; i < e->dep_nkeys && off < buflen - 1; i++) {
+        const char *n = sc_mapping_key_name(e->dep_keys[i]);
+        if (i > 0 && off < buflen - 1) buf[off++] = '+';
+        while (*n && off < buflen - 1) buf[off++] = *n++;
+    }
+    buf[off] = '\0';
+}
+
 static bool
 key_held(struct sc_input_manager *im, SDL_Keycode kc) {
+    // A virtual single-key entry exposes its logical state (momentary follows
+    // the physical key; toggle holds the flipped state) so other entries can
+    // depend on it even while no touch is injected.
+    struct sc_mapping_entry *v =
+        sc_mapping_manager_find_single(mm_of(im), kc);
+    if (v && v->is_virtual) {
+        return v->down;
+    }
     if (SC_MAPPING_KEYCODE_IS_MOUSE(kc)) {
         int button = SC_MAPPING_KEYCODE_MOUSE_BUTTON(kc);
         return button >= 1 && button <= 5 && im->map_mouse_down[button];
@@ -494,10 +526,20 @@ key_held(struct sc_input_manager *im, SDL_Keycode kc) {
     return im->g_pressed[kc & 0xFF];
 }
 
+// True when a dependency key set is fully satisfied. For a single key this is
+// just key_held(); for a combo every member must be held.
+static bool
+dep_keys_held(struct sc_input_manager *im, const struct sc_mapping_entry *e) {
+    for (int i = 0; i < e->dep_nkeys; i++) {
+        if (!key_held(im, e->dep_keys[i])) return false;
+    }
+    return e->dep_nkeys > 0;
+}
+
 static bool
 dep_ok(struct sc_input_manager *im, struct sc_mapping_entry *e) {
     if (e->dep == SC_MAPPING_DEP_NONE) return true;
-    bool held = key_held(im, e->dep_key);
+    bool held = dep_keys_held(im, e);
     return e->dep == SC_MAPPING_DEP_PRESSED ? held : !held;
 }
 
@@ -514,13 +556,17 @@ static void
 entry_activate(struct sc_input_manager *im, struct sc_mapping_entry *e) {
     if (!e || e->active) return;
     if (!dep_ok(im, e)) {
+        char depname[128] = "?";
+        dep_keys_to_name_log(e, depname, sizeof(depname));
         LOGI("Mapping '%s' not entered: dependency '%s' is not %s",
-             e->key_name, sc_mapping_key_name(e->dep_key),
+             e->key_name, depname,
              e->dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
         return;
     }
     e->active = true;
     e->down = true;
+    // Virtual keys never inject: they only carry logical state.
+    if (e->is_virtual) return;
     if (e->type == SC_MAPPING_TYPE_SLIDE) {
         if (!slide_start(im, e)) {
             // Could not open a slide slot / inject the DOWN: report it as
@@ -539,6 +585,7 @@ entry_deactivate(struct sc_input_manager *im, struct sc_mapping_entry *e) {
     bool was = e->active || e->down;
     e->active = false;
     e->down = false;
+    if (e->is_virtual) return; // nothing to lift
     if (e->type == SC_MAPPING_TYPE_SLIDE) {
         slide_stop_for_entry(im, e);
     } else if (e->type == SC_MAPPING_TYPE_MOTION) {
@@ -595,9 +642,9 @@ mapping_release_all(void *userdata) {
         bool was = e->active || e->down;
         e->active = false;
         e->down = false;
-        // Slides already sent their UP through slide_stop_all(); motion
-        // entries never own an entry-level DOWN.
-        if (was && e->type == SC_MAPPING_TYPE_TOUCH) {
+        // Virtual keys never injected a touch; slides already sent their UP
+        // through slide_stop_all(); motion entries never own an entry-level DOWN.
+        if (was && e->type == SC_MAPPING_TYPE_TOUCH && !e->is_virtual) {
             inject_entry(im, e, AMOTION_EVENT_ACTION_UP);
         }
     }
@@ -635,11 +682,16 @@ update_combos(struct sc_input_manager *im) {
                 }
             }
             c->active = true;
-            inject_entry(im, c, AMOTION_EVENT_ACTION_DOWN);
-            LOGI("Combo down: %s -> (%.3f, %.3f)", c->key_name, c->nx, c->ny);
+            if (!c->is_virtual) {
+                inject_entry(im, c, AMOTION_EVENT_ACTION_DOWN);
+            }
+            LOGI("Combo down: %s%s", c->key_name,
+                 c->is_virtual ? " (virtual)" : "");
         } else if (!match && c->active) {
             c->active = false;
-            inject_entry(im, c, AMOTION_EVENT_ACTION_UP);
+            if (!c->is_virtual) {
+                inject_entry(im, c, AMOTION_EVENT_ACTION_UP);
+            }
             LOGI("Combo up: %s", c->key_name);
             // Re-press single keys still held (entry_activate re-checks the
             // dependency condition)
@@ -749,15 +801,19 @@ manager_selected_entry(struct sc_input_manager *im) {
 static bool
 manager_apply(struct sc_input_manager *im, struct sc_mapping_entry *e,
               double nx, double ny, double ndx, double ndy, int duration_ms,
-              enum sc_mapping_mode mode, SDL_Keycode dep_key,
-              enum sc_mapping_dep dep, double sensitivity,
+              enum sc_mapping_mode mode, const SDL_Keycode *dep_keys,
+              int dep_nkeys, enum sc_mapping_dep dep, double sensitivity,
               enum sc_motion_hold hold, char *err, size_t errlen) {
-    const char *dep_name = dep == SC_MAPPING_DEP_NONE
-                         ? NULL : sc_mapping_key_name(dep_key);
+    char depname[128];
+    const char *dep_name = NULL;
+    if (dep != SC_MAPPING_DEP_NONE && dep_nkeys > 0) {
+        dep_name = sc_mapping_dep_keys_to_name(dep_keys, dep_nkeys, depname,
+                                               sizeof(depname));
+    }
     return sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, e->type,
                                         nx, ny, ndx, ndy, duration_ms, mode,
                                         dep_name, dep, sensitivity, hold,
-                                        err, errlen);
+                                        e->is_virtual, err, errlen);
 }
 
 static void
@@ -765,8 +821,10 @@ manager_set_dep(struct sc_input_manager *im, struct sc_mapping_entry *e,
                 SDL_Keycode dep_key, enum sc_mapping_dep dep) {
     struct sc_overlay *ov = ov_of(im);
     char err[128];
+    SDL_Keycode dk[1] = { dep_key };
+    int dnk = (dep == SC_MAPPING_DEP_NONE) ? 0 : 1;
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       e->mode, dep_key, dep, e->sensitivity, e->hold,
+                       e->mode, dk, dnk, dep, e->sensitivity, e->hold,
                        err, sizeof(err))) {
         char msg[192];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -910,8 +968,9 @@ manager_commit_edit(struct sc_input_manager *im) {
     else if (field == 5) sens = v;
 
     char err[128];
-    if (!manager_apply(im, e, nx, ny, ndx, ndy, dur, e->mode, e->dep_key,
-                       e->dep, sens, e->hold, err, sizeof(err))) {
+    if (!manager_apply(im, e, nx, ny, ndx, ndy, dur, e->mode, e->dep_keys,
+                       e->dep_nkeys, e->dep, sens, e->hold,
+                       err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -940,7 +999,7 @@ manager_create_entry(struct sc_input_manager *im, const char *key_name) {
     bool ok = existing
         ? manager_apply(im, existing, nx, ny, existing->ndx, existing->ndy,
                         existing->duration_ms, existing->mode,
-                        existing->dep_key, existing->dep,
+                        existing->dep_keys, existing->dep_nkeys, existing->dep,
                         existing->sensitivity, existing->hold,
                         err, sizeof(err))
         : sc_mapping_manager_upsert(mm, key_name, SC_MAPPING_TYPE_TOUCH,
@@ -1039,12 +1098,16 @@ manager_toggle_type(struct sc_input_manager *im) {
                              ? SC_MAPPING_MODE_MOMENTARY : e->mode;
 
     char err[128];
+    char depname[128];
+    const char *dep_name = NULL;
+    if (e->dep != SC_MAPPING_DEP_NONE && e->dep_nkeys > 0) {
+        dep_name = sc_mapping_dep_keys_to_name(e->dep_keys, e->dep_nkeys,
+                                               depname, sizeof(depname));
+    }
     if (!sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, new_type,
                                       e->nx, e->ny, ndx, ndy, dur, mode,
-                                      e->dep == SC_MAPPING_DEP_NONE ? NULL
-                                          : sc_mapping_key_name(e->dep_key),
-                                      e->dep, e->sensitivity,
-                                      SC_MOTION_HOLD_BUTTON,
+                                      dep_name, e->dep, e->sensitivity,
+                                      SC_MOTION_HOLD_BUTTON, e->is_virtual,
                                       err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1087,8 +1150,8 @@ manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
     }
     char err[128];
     if (!manager_apply(im, e, x, y, dx, dy, e->duration_ms, e->mode,
-                       e->dep_key, e->dep, e->sensitivity, e->hold,
-                       err, sizeof(err))) {
+                       e->dep_keys, e->dep_nkeys, e->dep, e->sensitivity,
+                       e->hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -1116,8 +1179,8 @@ manager_toggle_mode(struct sc_input_manager *im) {
                               : SC_MAPPING_MODE_TOGGLE;
     char err[128];
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       mode, e->dep_key, e->dep, e->sensitivity, e->hold,
-                       err, sizeof(err))) {
+                       mode, e->dep_keys, e->dep_nkeys, e->dep,
+                       e->sensitivity, e->hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -1148,8 +1211,8 @@ manager_toggle_hold(struct sc_input_manager *im) {
                              : SC_MOTION_HOLD_ALWAYS;
     char err[128];
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       e->mode, e->dep_key, e->dep, e->sensitivity, hold,
-                       err, sizeof(err))) {
+                       e->mode, e->dep_keys, e->dep_nkeys, e->dep,
+                       e->sensitivity, hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
@@ -1174,7 +1237,7 @@ manager_cycle_dep(struct sc_input_manager *im) {
         sc_overlay_manager_set_hint(ov,
             "Press the dependency key (Esc cancels)");
     } else if (e->dep == SC_MAPPING_DEP_PRESSED) {
-        manager_set_dep(im, e, e->dep_key, SC_MAPPING_DEP_RELEASED);
+        manager_set_dep(im, e, e->dep_keys[0], SC_MAPPING_DEP_RELEASED);
     } else {
         manager_set_dep(im, e, 0, SC_MAPPING_DEP_NONE);
     }

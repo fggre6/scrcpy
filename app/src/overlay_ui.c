@@ -300,11 +300,19 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
         draw_text(renderer, dx0, y, line, 255, 255, 255);
         y += MGR_ROW_H * 1.4f;
 
-        snprintf(line, sizeof(line), "type: %s",
+        snprintf(line, sizeof(line), "type: %s%s",
                  e->type == SC_MAPPING_TYPE_SLIDE ? "slide"
-                 : e->type == SC_MAPPING_TYPE_MOTION ? "motion" : "touch");
+                 : e->type == SC_MAPPING_TYPE_MOTION ? "motion" : "touch",
+                 e->is_virtual ? " (virtual, no touch)" : "");
         draw_text(renderer, dx0, y, line, 200, 200, 255);
         y += MGR_ROW_H * 1.4f;
+
+        if (e->npositions > 1 && !e->is_virtual) {
+            snprintf(line, sizeof(line), "positions: %d (multi-touch)",
+                     e->npositions);
+            draw_text(renderer, dx0, y, line, 255, 200, 150);
+            y += MGR_ROW_H * 1.4f;
+        }
 
         snprintf(line, sizeof(line), "mode: %s",
                  e->mode == SC_MAPPING_MODE_TOGGLE ? "toggle" : "momentary");
@@ -320,8 +328,11 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
         }
 
         if (e->dep != SC_MAPPING_DEP_NONE) {
+            char depname[128];
+            sc_mapping_dep_keys_to_name(e->dep_keys, e->dep_nkeys, depname,
+                                        sizeof(depname));
             snprintf(line, sizeof(line), "depend: %s %s",
-                     sc_mapping_key_name(e->dep_key),
+                     depname,
                      e->dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
         } else {
             snprintf(line, sizeof(line), "depend: none");

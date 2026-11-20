@@ -45,14 +45,16 @@
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `key` | string | **是** | 非空字符串。普通键名、组合键文法（见第 5 节）、鼠标按键名（见第 7 节）或保留字 `MOUSE_MOVE` / `MOUSE_LEFT_LOCKED`。 |
-| `x` | number | 见下 | 归一化横坐标，闭区间 `[0,1]`。`touch`/`slide` 必填；`motion` 可选（缺省 `0.5`，是回绕重锚点）。 |
+| `x` | number | 见下 | 归一化横坐标，闭区间 `[0,1]`。`touch`/`slide` 必填；`motion` 可选（缺省 `0.5`，是回绕重锚点）；`virtual` 条目可省略。 |
 | `y` | number | 见下 | 归一化纵坐标，闭区间 `[0,1]`。规则同 `x`。 |
+| `positions` | array | 否 | 仅 `touch`（非 virtual）。额外触控位置数组，每个元素是 `[x, y]` 数字对。按下时主位置 + 所有额外位置**同时按下**（多指），抬起时同时抬起。含主位置最多 `5` 个。见第 4.1 节。 |
+| `virtual` | bool | 否 | `true` 时为**虚拟键**：不注入任何触控，仅跟踪按键逻辑状态（按下/松开 或 toggle 翻转），供其它条目 `depends_on` 或作为组合键成员。`x`/`y`/`positions` 可省略。见第 4.2 节。 |
 | `type` | string | 否 | `"touch"`（默认）、`"slide"` 或 `"motion"`；其它值整条拒绝。 |
 | `dx` | number | slide 必填 | 归一化横向位移，闭区间 `[-1,1]`，可为负。 |
 | `dy` | number | slide 必填 | 归一化纵向位移，闭区间 `[-1,1]`，可为负。 |
 | `duration_ms` | number | 否 | 仅 slide 有意义。缺省 200；加载时夹到 `[50,5000]`。整数截断（`(int)`）。 |
-| `mode` | string | 否 | `"momentary"`（默认）或 `"toggle"`；其它值拒绝。`toggle` 只允许单键 `touch` 条目（鼠标按键可以，组合键 / slide / motion / `MOUSE_LEFT_LOCKED` 拒绝）。 |
-| `depends_on` | string | 否 | 依赖键：**单个**键名或鼠标按键名（不能是组合键）。见第 6.2 节。 |
+| `mode` | string | 否 | `"momentary"`（默认）或 `"toggle"`；其它值拒绝。`toggle` 只允许单键 `touch` 条目（鼠标按键可以，组合键 / slide / motion / `MOUSE_LEFT_LOCKED` 拒绝）。虚拟键也支持 `toggle`。 |
+| `depends_on` | string | 否 | 依赖键：单个键名、鼠标按键名，或组合键文法（如 `"lshift+a"`）。组合依赖要求所有成员同时按下。见第 6.2 节。 |
 | `depends_state` | string | 否 | `"pressed"`（默认）或 `"released"`；其它值拒绝。没有 `depends_on` 时出现 → 拒绝。 |
 | `sensitivity` | number | 否 | 仅 `type: "motion"` 允许，其它类型给出该字段 → 拒绝。缺省 `1.0`，有效范围 `[0.05, 20.0]`，越界夹取（加载时 `LOGW` 告警；面板编辑静默夹取）。见第 9 节。 |
 | `hold` | string | 否 | 仅 `type: "motion"` 允许。`"button"`（默认）表示只在按住鼠标键时才有虚拟手指；`"always"` 是**视角模式**：从第一次鼠标移动起虚拟手指按住，到边界自动回起点继续转，直到映射停止。见第 9.4 节。 |
@@ -66,18 +68,20 @@
 5. `type: "motion"` 与 `key: "MOUSE_MOVE"` 必须成对出现：
    - 类型是 motion 但键不是 `MOUSE_MOVE` → `type 'motion' requires key 'MOUSE_MOVE'`；
    - 键是 `MOUSE_MOVE` 但类型不是 motion → `'MOUSE_MOVE' requires type 'motion'`。
-6. `x`/`y`：两者都是 number 时校验范围；只出现一个或类型不对 → `'x'/'y' must both be numbers`；两者都缺失时只有 `motion` 允许（使用默认 `0.5, 0.5`），其它类型拒绝（`missing or invalid 'x'/'y'`）。越界 `[0,1]` **不夹取**，直接拒绝。
-7. `mode` 非 string 或值未知 → 拒绝。
-8. `depends_on` 非空 string 且不能含 `+`；随后解析键名，未知 → 拒绝。`depends_state` 规则见上表。
-9. `sensitivity` 非 number → 拒绝；非 motion 类型出现 → 拒绝（`'sensitivity' is only valid for type 'motion'`）；数值夹到 `[0.05, 20.0]` 并 `LOGW` 告警。
-10. `hold` 非 string → 拒绝；非 motion 类型出现 → 拒绝（`'hold' is only valid for type 'motion'`）；取值不是 `button` / `always` → 拒绝（`unknown hold '...'`）。
-11. 鼠标保留字 `MOUSE_LEFT_LOCKED` / `LEFT_CLICK_LOCKED` 的特殊分支：不允许 slide/motion（`cannot be a slide` / `cannot be a motion`）、不允许 `mode: toggle`、不允许 `depends_on`。
-12. `type: "motion"` 分支：不允许 `mode: toggle`；其余字段（`depends_on`、`hold`）允许。
-13. 其余键名走键表达式文法（第 5 节）；解析失败拒绝。**鼠标按键名也算单键**。
-14. `mode: toggle` 要求单键：组合键拒绝（`'mode: toggle' requires a single key, not a combo`）；slide 拒绝（`'mode: toggle' is not supported for slides`）。
-15. `depends_on` 与本条目的单键触发键相同 → 拒绝（`'...' depends on itself`）。
-16. slide：`key` 必须是单个键（组合键拒绝）；`dx`/`dy` 必须都是 number 且落在 `[-1,1]`；`duration_ms` 若存在必须是 number，然后夹取到 `[50,5000]`（夹取只告警，不拒绝）。
-17. 跨条目规则：slide 键不得同时作为某个组合键的成员，否则该 slide 条目被拒绝（`slide key '...' is also used in a combo`）。
+6. `virtual` 若存在必须是 bool；为 `true` 时：不能是 `MOUSE_MOVE` / `MOUSE_LEFT_LOCKED`，`type` 必须是 `touch`。
+7. `x`/`y`：两者都是 number 时校验范围；只出现一个或类型不对 → `'x'/'y' must both be numbers`；两者都缺失时只有 `motion` 或 `virtual` 允许（motion 使用默认 `0.5, 0.5`，virtual 不使用坐标），其它类型拒绝（`missing or invalid 'x'/'y'`）。越界 `[0,1]` **不夹取**，直接拒绝。
+8. `positions` 若存在必须是数组；virtual 条目出现 → 拒绝（`virtual keys cannot have 'positions'`）；每个元素必须是含 2 个数字的 `[x, y]` 对，越界 `[0,1]` 拒绝；额外位置数 > 4 拒绝（含主位置最多 5 个）。
+9. `mode` 非 string 或值未知 → 拒绝。
+10. `depends_on` 非空 string，用 `parse_key_expr()` 解析（支持单键或组合键），解析失败 → 拒绝。`depends_state` 规则见上表。
+11. `sensitivity` 非 number → 拒绝；非 motion 类型出现 → 拒绝（`'sensitivity' is only valid for type 'motion'`）；数值夹到 `[0.05, 20.0]` 并 `LOGW` 告警。
+12. `hold` 非 string → 拒绝；非 motion 类型出现 → 拒绝（`'hold' is only valid for type 'motion'`）；取值不是 `button` / `always` → 拒绝（`unknown hold '...'`）。
+13. 鼠标保留字 `MOUSE_LEFT_LOCKED` / `LEFT_CLICK_LOCKED` 的特殊分支：不允许 slide/motion（`cannot be a slide` / `cannot be a motion`）、不允许 `mode: toggle`、不允许 `depends_on`。
+14. `type: "motion"` 分支：不允许 `mode: toggle`；其余字段（`depends_on`、`hold`）允许。
+15. 其余键名走键表达式文法（第 5 节）；解析失败拒绝。**鼠标按键名也算单键**。
+16. `mode: toggle` 要求单键：组合键拒绝（`'mode: toggle' requires a single key, not a combo`）；slide 拒绝（`'mode: toggle' is not supported for slides`）。
+17. 单键条目的 `depends_on` 任一成员与自身触发键相同 → 拒绝（`'...' depends on itself`）。
+18. slide：`key` 必须是单个键（组合键拒绝）；`dx`/`dy` 必须都是 number 且落在 `[-1,1]`；`duration_ms` 若存在必须是 number，然后夹取到 `[50,5000]`（夹取只告警，不拒绝）。
+19. 跨条目规则：slide 键不得同时作为某个组合键的成员，否则该 slide 条目被拒绝（`slide key '...' is also used in a combo`）。
 
 所有拒绝都会 `LOGW` 一行（含模板路径与条目下标），并计入该模板的失败统计：
 `sc_mapping_manager.last_load` 的 `fail` 计数与最多 16 条 `msgs` 文本，
@@ -99,6 +103,26 @@
 - `motion` 条目的 `x`/`y` 是**起点 / 回绕重锚点**：第一次产生位移时在该点
   注入 DOWN，之后按相对位移移动；越界后在边界点 UP、回到该点重新 DOWN，
   继续往同方向滑动（`hold: "button"` 与 `"always"` 行为相同，见第 9 节）。
+
+### 4.1 多位置触控（`positions`）
+
+- 一个键可映射到多个屏幕位置：`x`/`y` 是第 0 个（主）位置，
+  `positions` 数组里的 `[x,y]` 对是第 1..N-1 个额外位置。
+- 按下该键时，**所有位置同时注入 DOWN**（各自独立的 pointer id，即多指）；
+  松开时同时注入 UP。
+- 含主位置最多 `5` 个位置（服务端 `MAX_POINTERS = 10`，留有余量）。
+- slide 与 motion 只用主位置，`positions` 对它们无意义（仅 `touch` 支持）。
+- 虚拟键不使用位置。
+
+### 4.2 虚拟键（`virtual: true`）
+
+- 虚拟键**不注入任何触控**，只跟踪逻辑状态：
+  - `momentary`：按下时状态为 true，松开为 false（跟随物理按键）；
+  - `toggle`：每次按下翻转状态。
+- 可作为其它条目的 `depends_on` 依赖目标（依赖条件检查的是虚拟键的逻辑状态，
+  而非物理按键状态——这正是 toggle 虚拟键的意义）。
+- 可作为组合键的成员（组合判定仍看物理按键是否按下）。
+- `x`/`y`/`positions` 可省略；不分配 pointer id。
 
 ## 5. 组合键文法
 
@@ -150,9 +174,12 @@
 
 ### 6.2 依赖键（`depends_on`）
 
-- 只接受**单个**键名（同一个解析函数）或鼠标按键名；含 `+` 直接拒绝
-  （`dependency must be a single key, not a combo`）。
+- 接受**单个**键名、鼠标按键名，或组合键文法（如 `"lshift+a"`），
+  用 `parse_key_expr()` 解析；解析失败直接拒绝。
+- 组合依赖：所有成员同时按下时满足条件。
 - 不允许依赖条目自身的单键触发键（`depends on itself`）。
+- 若依赖目标是**虚拟键**，依赖条件检查的是虚拟键的逻辑状态
+  （`down` 字段），而非物理按键状态——这使得 toggle 虚拟键可作为开关。
 - 依赖键可以**没有**自己的映射条目：这类键仍会被跟踪按下状态
   （`sc_mapping_manager_key_is_dependency()`），并且按键事件继续正常转发。
 - `depends_state` 缺省 `pressed`：
@@ -436,14 +463,19 @@ dny = yrel * sensitivity / frame_height
 | 未知 `type` | 该条拒绝：`unknown type '...'`，计入失败统计。 |
 | motion 类型但键不是 `MOUSE_MOVE` | 该条拒绝：`type 'motion' requires key 'MOUSE_MOVE'`。 |
 | `MOUSE_MOVE` 但类型不是 motion | 该条拒绝：`'MOUSE_MOVE' requires type 'motion'`。 |
+| `virtual` 非 bool | 该条拒绝：`'virtual' must be a boolean`。 |
+| `virtual: true` + 保留字 / 非 touch | 该条拒绝：`reserved names cannot be virtual` / `virtual keys only support type 'touch'`。 |
+| `positions` 非数组 | 该条拒绝：`'positions' must be an array`。 |
+| `virtual: true` + `positions` | 该条拒绝：`virtual keys cannot have 'positions'`。 |
+| `positions` 元素非 `[x,y]` 数字对 | 该条拒绝：`each position must be a [x, y] pair` / `position coordinates must be numbers`。 |
+| `positions` 越界或超过 4 个 | 该条拒绝：`position out of range [0,1]` / `too many positions`。 |
 | `mode` 非字符串/未知值 | 该条拒绝：`'mode' must be a string` / `unknown mode '...'`。 |
 | `mode: toggle` + 组合键 | 该条拒绝：`'mode: toggle' requires a single key, not a combo`。 |
 | `mode: toggle` + slide | 该条拒绝：`'mode: toggle' is not supported for slides`。 |
 | `mode: toggle` + motion | 该条拒绝：`'mode: toggle' is not supported for motion`。 |
 | `MOUSE_LEFT_LOCKED` + `mode: toggle` | 该条拒绝：`cannot use 'mode: toggle'`。 |
 | `depends_on` 非字符串/空 | 该条拒绝：`missing or invalid 'depends_on'`。 |
-| `depends_on` 含 `+` | 该条拒绝：`dependency must be a single key, not a combo`。 |
-| `depends_on` 键名未知 | 该条拒绝：`unknown dependency key '...'`。 |
+| `depends_on` 键表达式解析失败 | 该条拒绝：`parse error in key expression '...'`。 |
 | `depends_state` 没有 `depends_on` | 该条拒绝：`'depends_state' requires 'depends_on'`。 |
 | `depends_state` 非字符串/未知值 | 该条拒绝：`'depends_state' must be a string` / `unknown depends_state '...'`。 |
 | 条目依赖自身触发键 | 该条拒绝：`'...' depends on itself`。 |

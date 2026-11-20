@@ -10,6 +10,9 @@
 #include "util/tick.h"
 
 #define SC_MAPPING_MAX_KEYS 4
+// A single key may map to several screen positions (simultaneous multi-touch).
+// The server supports MAX_POINTERS = 10; we cap well below that.
+#define SC_MAPPING_MAX_POSITIONS 5
 // Fixed-capacity entry table: realloc is forbidden, because other modules keep
 // indices (and index-based lookups) into this array across calls.
 #define SC_MAPPING_MAX_ENTRIES 256
@@ -31,8 +34,8 @@ enum sc_mapping_mode {
     SC_MAPPING_MODE_TOGGLE = 1,    // each press flips the injected state
 };
 
-// Dependency condition: the mapping only exists while `dep_key` is in the
-// requested state.
+// Dependency condition: the mapping only exists while the dependency key set
+// is in the requested state.
 enum sc_mapping_dep {
     SC_MAPPING_DEP_NONE = 0,
     SC_MAPPING_DEP_PRESSED = 1,  // depends_on must be held
@@ -76,16 +79,31 @@ struct sc_mapping_entry {
     int nkeys;                             // 0 = special mouse entry
     enum sc_mapping_entry_type type;
     enum sc_mapping_mode mode;             // momentary (default) or toggle
-    double nx;
+    double nx;                             // primary position (index 0)
     double ny;
+    // Multi-touch: additional positions (indices 1 .. npositions-1). When
+    // npositions > 1 the key presses every position at once (separate
+    // pointer ids). Slide and motion always use the primary position only.
+    int npositions;                        // 1 = single (default)
+    double extra_nx[SC_MAPPING_MAX_POSITIONS - 1];
+    double extra_ny[SC_MAPPING_MAX_POSITIONS - 1];
+    int32_t extra_pid[SC_MAPPING_MAX_POSITIONS - 1];
+    // Virtual key: never injects a touch, only tracks logical state so other
+    // entries can depend on it or include it in a combo. Has no position and
+    // no pointer id.
+    bool is_virtual;
     double ndx;        // slide only
     double ndy;        // slide only
     int duration_ms;   // slide only
     double sensitivity; // motion only
     enum sc_motion_hold hold;  // motion only: button-gated or latched look mode
-    SDL_Keycode dep_key;       // dependency key (valid when dep != NONE)
+    // Dependency: the entry is active only while the dependency is in the
+    // requested state. dep_nkeys == 0 means no dependency; dep_nkeys == 1 is
+    // a single key; dep_nkeys > 1 is a combo dependency (all members held).
+    SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS];
+    int dep_nkeys;
     enum sc_mapping_dep dep;   // dependency condition
-    int32_t pointer_id; // unique pointer id, 0 while unassigned
+    int32_t pointer_id; // primary pointer id, 0 while unassigned (virtual = 0)
     bool down;         // trigger held (momentary) / logical state (toggle)
     bool active;       // injected press currently outstanding
     bool is_mouse;     // MOUSE_LEFT_LOCKED entry
@@ -220,6 +238,7 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
 
 // Full variant: also sets mode, dependency and motion sensitivity. All the
 // extra parameters are optional (NULL / NONE / 0 keep the defaults).
+// is_virtual creates a virtual key (no touch injection, state only).
 bool
 sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name,
                              enum sc_mapping_entry_type type, double nx,
@@ -227,6 +246,7 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
                              enum sc_mapping_mode mode,
                              const char *dep_name, enum sc_mapping_dep dep,
                              double sensitivity, enum sc_motion_hold hold,
+                             bool is_virtual,
                              char *err, size_t errlen);
 
 // True when some entry depends on this key (its state must be tracked even if
@@ -277,6 +297,13 @@ sc_mapping_parse_key_name(const char *name);
 
 const char *
 sc_mapping_key_name(SDL_Keycode kc);
+
+// Render a keycode array as a "A+B+C" expression. Writes into buf (caller
+// provided) and returns it, or NULL when nkeys <= 0. Used to round-trip a
+// combo dependency through the string-based upsert API.
+const char *
+sc_mapping_dep_keys_to_name(const SDL_Keycode *keys, int nkeys, char *buf,
+                            size_t buflen);
 
 // Validate a key expression ("a", "W+A", "MOUSE_RIGHT") with the same grammar
 // as the loader. On failure, writes a reason into err.
