@@ -285,7 +285,7 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
                         : e->type == SC_MAPPING_TYPE_MOTION ? "M" : "T";
         snprintf(line, sizeof(line), "%s %-12s %s%s%s", tag, e->key_name,
                  e->mode == SC_MAPPING_MODE_TOGGLE ? "(tog)" : "",
-                 e->dep != SC_MAPPING_DEP_NONE ? "(dep)" : "",
+                 e->ndeps > 0 ? "(dep)" : "",
                  e->is_mouse ? "(mouse)" : "");
         draw_text(renderer, ex, y, line, 220, 220, 220);
     }
@@ -327,13 +327,27 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
             y += MGR_ROW_H * 1.4f;
         }
 
-        if (e->dep != SC_MAPPING_DEP_NONE) {
-            char depname[128];
-            sc_mapping_dep_keys_to_name(e->dep_keys, e->dep_nkeys, depname,
-                                        sizeof(depname));
-            snprintf(line, sizeof(line), "depend: %s %s",
-                     depname,
-                     e->dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
+        if (e->ndeps > 0) {
+            // Every condition is listed: "lshift pressed", "entry:VIRT active",
+            // "flag:look_mode on", ...
+            char depname[160];
+            depname[0] = '\0';
+            size_t off = 0;
+            for (int d = 0; d < e->ndeps; d++) {
+                char one[128];
+                sc_cond_to_name(&e->deps[d], one, sizeof(one));
+                int n = snprintf(depname + off, sizeof(depname) - off, "%s%s %s",
+                                 d > 0 ? ", " : "", one,
+                                 sc_cond_state_name(&e->deps[d]));
+                if (n < 0) {
+                    break;
+                }
+                off += (size_t) n;
+                if (off >= sizeof(depname) - 1) {
+                    break;
+                }
+            }
+            snprintf(line, sizeof(line), "depend: %s", depname);
         } else {
             snprintf(line, sizeof(line), "depend: none");
         }
@@ -383,7 +397,7 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
                20, 20, 26, 235);
     const char *keys =
         "Tab focus  Up/Down select  N new  Del remove  T type  M mode  "
-        "D depend  V motion  H hold  P pick  O end  E enable  S save";
+        "D depend  G feature  V motion  H hold  P pick  O end  E enable  S save";
     draw_text(renderer, 8, fy + 4, keys, 170, 190, 220);
     const char *hint = ov->mgr_hint[0] ? ov->mgr_hint : "";
     draw_text(renderer, 8, fy + 18,

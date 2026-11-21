@@ -23,6 +23,7 @@ src = [
     'src/hwdec.c',
     'src/icon.c',
     'src/input_manager.c',
+    'src/mapping_cond.c',
     'src/mapping_manager.c',
     'src/overlay_ui.c',
     'src/keyboard_sdk.c',
@@ -316,6 +317,14 @@ if get_option('buildtype') == 'debug'
         ['test_orientation', [
             'tests/test_orientation.c',
             'src/options.c',
+        ]],
+        ['test_mapping_cond', [
+            'tests/test_mapping_cond.c',
+            'src/mapping_cond.c',
+            'src/mapping_manager.c',
+            'src/util/cJSON.c',
+            'src/util/log.c',
+            'src/util/tick.c',
         ]],
         ['test_strbuf', [
             'tests/test_strbuf.c',

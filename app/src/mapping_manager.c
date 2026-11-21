@@ -77,11 +77,11 @@ parse_mouse_button_name(const char *name, int *button) {
 
 char *
 sc_mapping_get_base_dir(void) {
+    // SDL_GetBasePath() returns a pointer owned by SDL (it caches it), so it
+    // must not be freed here: only the copy handed to the caller is.
     const char *base = SDL_GetBasePath();
     if (base) {
-        char *copy = SDL_strdup(base);
-        SDL_free((void *) base);
-        return copy;
+        return SDL_strdup(base);
     }
     return SDL_strdup("./");
 }
@@ -307,28 +307,6 @@ sc_mapping_key_name(SDL_Keycode kc) {
     return "Unknown";
 }
 
-// Render a dependency key set back into a "A+B+C" expression. Used to round-trip
-// a combo dependency through upsert_ex (which takes a name string).
-const char *
-sc_mapping_dep_keys_to_name(const SDL_Keycode *keys, int nkeys, char *buf,
-                             size_t buflen) {
-    if (nkeys <= 0 || !buf || buflen == 0) return NULL;
-    size_t off = 0;
-    for (int i = 0; i < nkeys && off < buflen - 1; i++) {
-        const char *n = sc_mapping_key_name(keys[i]);
-        int nlen = (int) strlen(n);
-        if (i > 0) {
-            if (off < buflen - 1) buf[off++] = '+';
-        }
-        int copy = nlen;
-        if (off + copy >= buflen) copy = (int) (buflen - 1 - off);
-        if (copy > 0) memcpy(buf + off, n, (size_t) copy);
-        off += (size_t) copy;
-    }
-    buf[off] = '\0';
-    return buf;
-}
-
 // ============================================================
 // Key expression grammar
 // ============================================================
@@ -340,94 +318,8 @@ sc_mapping_dep_keys_to_name(const SDL_Keycode *keys, int nkeys, char *buf,
         }                                            \
     } while (0)
 
-// Strict grammar: a single key, or "A+B[+C[+D]]" (2..4 members, no empty member,
-// no duplicate member, no member longer than 63 bytes).
-static bool
-parse_key_expr(const char *name, SDL_Keycode *out, int *nkeys_out,
-               char *err, size_t errlen) {
-    if (!name || !*name) {
-        ERR_MSG("empty key name");
-        return false;
-    }
-
-    int nmem = 1;
-    for (const char *p = name; *p; p++) {
-        if (*p == '+') nmem++;
-    }
-    if (nmem > SC_MAPPING_MAX_KEYS) {
-        ERR_MSG("too many combo members (%d > %d) in '%s'", nmem,
-                SC_MAPPING_MAX_KEYS, name);
-        return false;
-    }
-
-    if (nmem == 1) {
-        SDL_Keycode kc = sc_mapping_parse_key_name(name);
-        if (kc == SDLK_UNKNOWN) {
-            ERR_MSG("unknown key '%s'", name);
-            return false;
-        }
-        out[0] = kc;
-        *nkeys_out = 1;
-        return true;
-    }
-
-    const char *p = name;
-    int n = 0;
-    while (true) {
-        const char *q = strchr(p, '+');
-        size_t len = q ? (size_t) (q - p) : strlen(p);
-        if (len == 0) {
-            ERR_MSG("empty combo member in '%s'", name);
-            return false;
-        }
-        if (len >= 64) {
-            ERR_MSG("combo member too long in '%s'", name);
-            return false;
-        }
-        char tok[64];
-        memcpy(tok, p, len);
-        tok[len] = '\0';
-        // trim
-        char *ts = tok;
-        while (*ts && isspace((unsigned char) *ts)) ts++;
-        char *te = ts + strlen(ts);
-        while (te > ts && isspace((unsigned char) *(te - 1))) te--;
-        *te = '\0';
-        if (*ts == '\0') {
-            ERR_MSG("empty combo member in '%s'", name);
-            return false;
-        }
-
-        SDL_Keycode kc = sc_mapping_parse_key_name(ts);
-        if (kc == SDLK_UNKNOWN) {
-            ERR_MSG("unknown key '%s' in '%s'", ts, name);
-            return false;
-        }
-        // Mouse buttons have no keyboard press state, so they cannot take part
-        // in a combo: a combo requires every member to be held at once.
-        if (SC_MAPPING_KEYCODE_IS_MOUSE(kc)) {
-            ERR_MSG("mouse button '%s' cannot be a combo member in '%s'", ts,
-                    name);
-            return false;
-        }
-        for (int i = 0; i < n; i++) {
-            if (out[i] == kc) {
-                ERR_MSG("duplicate combo member '%s' in '%s'", ts, name);
-                return false;
-            }
-        }
-        out[n++] = kc;
-        if (!q) break;
-        p = q + 1;
-    }
-
-    if (n < 2) {
-        ERR_MSG("combo needs at least 2 members: '%s'", name);
-        return false;
-    }
-    *nkeys_out = n;
-    return true;
-}
+// The key expression grammar itself lives in mapping_cond.c, next to the
+// dependency reference grammar it shares ("key:" prefix).
 
 bool
 sc_mapping_validate_key_expr(const char *name, char *err, size_t errlen) {
@@ -438,7 +330,13 @@ sc_mapping_validate_key_expr(const char *name, char *err, size_t errlen) {
     }
     SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
     int nkeys = 0;
-    return parse_key_expr(name, keys, &nkeys, err, errlen);
+    return sc_cond_parse_key_expr(name, keys, &nkeys, err, errlen);
+}
+
+bool
+sc_mapping_validate_cond_ref(const char *expr, char *err, size_t errlen) {
+    struct sc_mapping_cond c;
+    return sc_cond_parse_ref(expr, &c, err, errlen);
 }
 
 // ============================================================
@@ -550,6 +448,22 @@ struct sc_parse_out {
     struct sc_mapping_load_stats stats;
 };
 
+// Copy the parsed dependency conditions into an entry.
+static void
+entry_set_deps(struct sc_mapping_entry *e, const struct sc_mapping_cond *deps,
+               int ndeps) {
+    if (ndeps < 0) {
+        ndeps = 0;
+    }
+    if (ndeps > SC_COND_MAX_DEPS) {
+        ndeps = SC_COND_MAX_DEPS;
+    }
+    if (ndeps > 0 && deps) {
+        memcpy(e->deps, deps, (size_t) ndeps * sizeof(deps[0]));
+    }
+    e->ndeps = ndeps;
+}
+
 static void
 stat_fail(struct sc_mapping_load_stats *st, const char *tmpl, int index,
           const char *reason) {
@@ -577,6 +491,9 @@ parse_clamp_duration(int *duration_ms, const char *tmpl, int index) {
 
 static void
 cross_validate_slides(struct sc_parse_out *out, const char *path);
+
+static void
+cross_validate_deps(struct sc_parse_out *out, const char *path);
 
 static bool
 parse_template(const char *path, struct sc_parse_out *out) {
@@ -809,44 +726,120 @@ parse_template(const char *path, struct sc_parse_out *out) {
             }
         }
 
-        // dependency (optional): "depends_on" is a single key, a mouse button
-        // or a combo ("A+B"); "depends_state" is "pressed" (default) or
-        // "released". A combo dependency is satisfied when every member is
-        // held (equivalent to depending on a virtual combo entry).
-        enum sc_mapping_dep dep = SC_MAPPING_DEP_NONE;
-        SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS] = { 0 };
-        int dep_nkeys = 0;
+        // Dependency (optional). "depends_on" accepts:
+        //   - a string: a key / mouse button / key combo ("lshift", "A+B"),
+        //     an entry reference ("entry:VIRT") or a feature flag
+        //     ("flag:look_mode");
+        //   - an array of strings: several conditions, all of which must hold
+        //     (logical AND).
+        // "depends_state" is a string (applied to every condition) or an array
+        // of strings (one per condition). Default: "pressed" (i.e. the source
+        // must be held / active / on).
+        struct sc_mapping_cond deps[SC_COND_MAX_DEPS];
+        int ndeps = 0;
         cJSON *jdep = cJSON_GetObjectItemCaseSensitive(item, "depends_on");
         cJSON *jdepstate = cJSON_GetObjectItemCaseSensitive(item,
                                                            "depends_state");
         if (jdep) {
-            if (!cJSON_IsString(jdep) || !jdep->valuestring
-                    || !*jdep->valuestring) {
-                stat_fail(&out->stats, path, i,
-                          "missing or invalid 'depends_on'");
-                continue;
-            }
-            if (!parse_key_expr(jdep->valuestring, dep_keys, &dep_nkeys,
-                                err, sizeof(err))) {
-                stat_fail(&out->stats, path, i, err);
-                continue;
-            }
-            dep = SC_MAPPING_DEP_PRESSED;
-            if (jdepstate) {
-                if (!cJSON_IsString(jdepstate)) {
+            if (cJSON_IsString(jdep)) {
+                if (!jdep->valuestring || !*jdep->valuestring) {
                     stat_fail(&out->stats, path, i,
-                              "'depends_state' must be a string");
+                              "missing or invalid 'depends_on'");
                     continue;
                 }
-                if (SDL_strcasecmp(jdepstate->valuestring, "pressed") == 0) {
-                    dep = SC_MAPPING_DEP_PRESSED;
-                } else if (SDL_strcasecmp(jdepstate->valuestring,
-                                          "released") == 0) {
-                    dep = SC_MAPPING_DEP_RELEASED;
-                } else {
-                    snprintf(err, sizeof(err), "unknown depends_state '%s'",
-                             jdepstate->valuestring);
+                if (!sc_cond_parse_ref(jdep->valuestring, &deps[0], err,
+                                       sizeof(err))) {
                     stat_fail(&out->stats, path, i, err);
+                    continue;
+                }
+                ndeps = 1;
+            } else if (cJSON_IsArray(jdep)) {
+                int n = cJSON_GetArraySize(jdep);
+                if (n < 1) {
+                    stat_fail(&out->stats, path, i,
+                              "'depends_on' array must not be empty");
+                    continue;
+                }
+                if (n > SC_COND_MAX_DEPS) {
+                    snprintf(err, sizeof(err),
+                             "too many dependencies (%d > %d)", n,
+                             SC_COND_MAX_DEPS);
+                    stat_fail(&out->stats, path, i, err);
+                    continue;
+                }
+                bool dep_ok_parse = true;
+                for (int d = 0; d < n; d++) {
+                    cJSON *jd = cJSON_GetArrayItem(jdep, d);
+                    if (!cJSON_IsString(jd) || !jd->valuestring
+                            || !*jd->valuestring) {
+                        stat_fail(&out->stats, path, i,
+                                  "each dependency must be a non-empty string");
+                        dep_ok_parse = false;
+                        break;
+                    }
+                    if (!sc_cond_parse_ref(jd->valuestring, &deps[d], err,
+                                           sizeof(err))) {
+                        stat_fail(&out->stats, path, i, err);
+                        dep_ok_parse = false;
+                        break;
+                    }
+                }
+                if (!dep_ok_parse) {
+                    continue;
+                }
+                ndeps = n;
+            } else {
+                stat_fail(&out->stats, path, i,
+                          "'depends_on' must be a string or an array of strings");
+                continue;
+            }
+
+            // "depends_state": a single state for every condition, or one
+            // state per condition.
+            if (jdepstate) {
+                if (cJSON_IsString(jdepstate)) {
+                    enum sc_mapping_cond_state st;
+                    if (!sc_cond_parse_state(jdepstate->valuestring, &st, err,
+                                             sizeof(err))) {
+                        stat_fail(&out->stats, path, i, err);
+                        continue;
+                    }
+                    for (int d = 0; d < ndeps; d++) {
+                        deps[d].state = st;
+                    }
+                } else if (cJSON_IsArray(jdepstate)) {
+                    int n = cJSON_GetArraySize(jdepstate);
+                    if (n != ndeps) {
+                        snprintf(err, sizeof(err),
+                                 "'depends_state' has %d entries but "
+                                 "'depends_on' has %d", n, ndeps);
+                        stat_fail(&out->stats, path, i, err);
+                        continue;
+                    }
+                    bool state_ok = true;
+                    for (int d = 0; d < n; d++) {
+                        cJSON *js = cJSON_GetArrayItem(jdepstate, d);
+                        if (!cJSON_IsString(js)) {
+                            stat_fail(&out->stats, path, i,
+                                      "'depends_state' entries must be strings");
+                            state_ok = false;
+                            break;
+                        }
+                        enum sc_mapping_cond_state st;
+                        if (!sc_cond_parse_state(js->valuestring, &st, err,
+                                                 sizeof(err))) {
+                            stat_fail(&out->stats, path, i, err);
+                            state_ok = false;
+                            break;
+                        }
+                        deps[d].state = st;
+                    }
+                    if (!state_ok) {
+                        continue;
+                    }
+                } else {
+                    stat_fail(&out->stats, path, i,
+                              "'depends_state' must be a string or an array");
                     continue;
                 }
             }
@@ -925,7 +918,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
                 stat_fail(&out->stats, path, i, err);
                 continue;
             }
-            if (dep != SC_MAPPING_DEP_NONE) {
+            if (ndeps > 0) {
                 snprintf(err, sizeof(err),
                          "'%s' cannot use 'depends_on'", key_name);
                 stat_fail(&out->stats, path, i, err);
@@ -972,9 +965,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
             e->npositions = 1;
             e->sensitivity = sensitivity;
             e->hold = hold;
-            e->dep = dep;
-            memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
-            e->dep_nkeys = dep_nkeys;
+            entry_set_deps(e, deps, ndeps);
             out->count++;
             out->stats.ok++;
             continue;
@@ -982,7 +973,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
 
         SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
         int nkeys = 0;
-        if (!parse_key_expr(key_name, keys, &nkeys, err, sizeof(err))) {
+        if (!sc_cond_parse_key_expr(key_name, keys, &nkeys, err, sizeof(err))) {
             stat_fail(&out->stats, path, i, err);
             continue;
         }
@@ -1006,12 +997,18 @@ parse_template(const char *path, struct sc_parse_out *out) {
             stat_fail(&out->stats, path, i, err);
             continue;
         }
-        if (dep != SC_MAPPING_DEP_NONE && nkeys == 1) {
+        // A single-key entry may not depend on its own trigger key.
+        if (ndeps > 0 && nkeys == 1) {
             bool self_dep = false;
-            for (int di = 0; di < dep_nkeys; di++) {
-                if (dep_keys[di] == keys[0]) {
-                    self_dep = true;
-                    break;
+            for (int di = 0; di < ndeps && !self_dep; di++) {
+                if (deps[di].kind != SC_COND_KIND_KEY) {
+                    continue;
+                }
+                for (int dj = 0; dj < deps[di].nkeys; dj++) {
+                    if (deps[di].keys[dj] == keys[0]) {
+                        self_dep = true;
+                        break;
+                    }
                 }
             }
             if (self_dep) {
@@ -1073,9 +1070,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
             e->ndy = ndy;
             e->duration_ms = duration_ms;
             e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
-            e->dep = dep;
-            memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
-            e->dep_nkeys = dep_nkeys;
+            entry_set_deps(e, deps, ndeps);
             out->count++;
             out->stats.ok++;
             continue;
@@ -1101,9 +1096,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
         }
         e->duration_ms = 0;
         e->sensitivity = SC_MAPPING_SENSITIVITY_DEFAULT;
-        e->dep = dep;
-        memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
-        e->dep_nkeys = dep_nkeys;
+        entry_set_deps(e, deps, ndeps);
         out->count++;
         out->stats.ok++;
     }
@@ -1113,6 +1106,7 @@ parse_template(const char *path, struct sc_parse_out *out) {
     }
 
     cross_validate_slides(out, path);
+    cross_validate_deps(out, path);
 
     cJSON_Delete(root);
     return true;
@@ -1127,6 +1121,107 @@ parse_out_free(struct sc_parse_out *out) {
     free(out->entries);
     out->entries = NULL;
     out->count = 0;
+}
+
+// Compact the entry table after a rejection (drop the holes).
+static void
+compact_entries(struct sc_parse_out *out) {
+    int n = 0;
+    for (int i = 0; i < out->count; i++) {
+        if (!out->entries[i].key_name) continue;
+        if (n != i) out->entries[n] = out->entries[i];
+        n++;
+    }
+    out->count = n;
+}
+
+// Find the entry named "name" among the parsed entries (NULL when unknown).
+static struct sc_mapping_entry *
+find_parsed_by_name(struct sc_parse_out *out, const char *name) {
+    if (!name || !*name) {
+        return NULL;
+    }
+    for (int i = 0; i < out->count; i++) {
+        struct sc_mapping_entry *e = &out->entries[i];
+        if (e->key_name && SDL_strcasecmp(e->key_name, name) == 0) {
+            return e;
+        }
+    }
+    return NULL;
+}
+
+// True when the dependency chain that starts at "name" reaches "target"
+// (following every entry condition of every visited entry).
+static bool
+dep_chain_reaches(struct sc_parse_out *out, const char *name,
+                  const char *target, int depth) {
+    if (depth > SC_MAPPING_MAX_ENTRIES) {
+        return false; // defensive: the table is bounded
+    }
+    struct sc_mapping_entry *e = find_parsed_by_name(out, name);
+    if (!e) {
+        return false;
+    }
+    for (int d = 0; d < e->ndeps; d++) {
+        if (e->deps[d].kind != SC_COND_KIND_ENTRY) {
+            continue;
+        }
+        if (SDL_strcasecmp(e->deps[d].name, target) == 0) {
+            return true;
+        }
+        if (dep_chain_reaches(out, e->deps[d].name, target, depth + 1)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Cross-validate the dependency conditions that reference another entry:
+//   - the referenced entry must exist in the same template;
+//   - an entry may not depend on itself;
+//   - dependency chains must not form a cycle (A depends on B, B on A).
+// A rejected entry is dropped, like an entry rejected by the field checks.
+static void
+cross_validate_deps(struct sc_parse_out *out, const char *path) {
+    for (int i = 0; i < out->count; i++) {
+        struct sc_mapping_entry *e = &out->entries[i];
+        if (!e->key_name || e->ndeps <= 0) {
+            continue;
+        }
+        bool reject = false;
+        char reason[128] = { 0 };
+        for (int d = 0; d < e->ndeps && !reject; d++) {
+            if (e->deps[d].kind != SC_COND_KIND_ENTRY) {
+                continue;
+            }
+            const char *target = e->deps[d].name;
+            if (SDL_strcasecmp(target, e->key_name) == 0) {
+                snprintf(reason, sizeof(reason),
+                         "'%s' depends on itself", e->key_name);
+                reject = true;
+                break;
+            }
+            if (!find_parsed_by_name(out, target)) {
+                snprintf(reason, sizeof(reason),
+                         "unknown dependency entry '%s'", target);
+                reject = true;
+                break;
+            }
+            if (dep_chain_reaches(out, target, e->key_name, 0)) {
+                snprintf(reason, sizeof(reason),
+                         "dependency cycle through '%s'", target);
+                reject = true;
+                break;
+            }
+        }
+        if (reject) {
+            stat_fail(&out->stats, path, i, reason);
+            free(e->key_name);
+            e->key_name = NULL;
+        }
+    }
+    // compact
+    compact_entries(out);
 }
 
 // A slide key must not also take part in a combo (the combo would press it as a
@@ -1157,13 +1252,7 @@ cross_validate_slides(struct sc_parse_out *out, const char *path) {
         }
     }
     // compact
-    int n = 0;
-    for (int i = 0; i < out->count; i++) {
-        if (!out->entries[i].key_name) continue;
-        if (n != i) out->entries[n] = out->entries[i];
-        n++;
-    }
-    out->count = n;
+    compact_entries(out);
 }
 
 // Atomically replace the live entries by the parsed ones. The release hook is
@@ -1252,14 +1341,29 @@ save_active_impl(struct sc_mapping_manager *mm, bool force) {
         if (e->mode == SC_MAPPING_MODE_TOGGLE) {
             cJSON_AddStringToObject(item, "mode", "toggle");
         }
-        if (e->dep != SC_MAPPING_DEP_NONE && e->dep_nkeys > 0) {
+        // Dependency: one condition -> a plain string, several -> an array.
+        // The state is written with the word matching the source kind
+        // ("pressed" for a key, "active" for an entry, "on" for a flag).
+        if (e->ndeps > 0) {
             char depname[128];
-            sc_mapping_dep_keys_to_name(e->dep_keys, e->dep_nkeys, depname,
-                                        sizeof(depname));
-            cJSON_AddStringToObject(item, "depends_on", depname);
-            cJSON_AddStringToObject(item, "depends_state",
-                                    e->dep == SC_MAPPING_DEP_RELEASED
-                                        ? "released" : "pressed");
+            if (e->ndeps == 1) {
+                sc_cond_to_name(&e->deps[0], depname, sizeof(depname));
+                cJSON_AddStringToObject(item, "depends_on", depname);
+                cJSON_AddStringToObject(item, "depends_state",
+                                        sc_cond_state_name(&e->deps[0]));
+            } else {
+                cJSON *deps = cJSON_CreateArray();
+                cJSON *states = cJSON_CreateArray();
+                for (int d = 0; d < e->ndeps; d++) {
+                    sc_cond_to_name(&e->deps[d], depname, sizeof(depname));
+                    cJSON_AddItemToArray(deps, cJSON_CreateString(depname));
+                    cJSON_AddItemToArray(states,
+                                         cJSON_CreateString(
+                                             sc_cond_state_name(&e->deps[d])));
+                }
+                cJSON_AddItemToObject(item, "depends_on", deps);
+                cJSON_AddItemToObject(item, "depends_state", states);
+            }
         }
         cJSON_AddItemToArray(arr, item);
     }
@@ -1572,7 +1676,7 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
                           char *err, size_t errlen) {
     return sc_mapping_manager_upsert_ex(mm, key_name, type, nx, ny, ndx, ndy,
                                         duration_ms, SC_MAPPING_MODE_MOMENTARY,
-                                        NULL, SC_MAPPING_DEP_NONE,
+                                        NULL, 0,
                                         SC_MAPPING_SENSITIVITY_DEFAULT,
                                         SC_MOTION_HOLD_BUTTON, false,
                                         err, errlen);
@@ -1583,7 +1687,7 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
                              enum sc_mapping_entry_type type, double nx,
                              double ny, double ndx, double ndy, int duration_ms,
                              enum sc_mapping_mode mode,
-                             const char *dep_name, enum sc_mapping_dep dep,
+                             const struct sc_mapping_cond *deps, int ndeps,
                              double sensitivity, enum sc_motion_hold hold,
                              bool is_virtual,
                              char *err, size_t errlen) {
@@ -1635,8 +1739,12 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
         ERR_MSG("'x'/'y' out of range [0,1]");
         return false;
     }
-    if (is_mouse && dep != SC_MAPPING_DEP_NONE) {
+    if (is_mouse && ndeps > 0) {
         ERR_MSG("mouse lock entries cannot use a dependency");
+        return false;
+    }
+    if (ndeps < 0 || ndeps > SC_COND_MAX_DEPS) {
+        ERR_MSG("invalid dependency count (%d)", ndeps);
         return false;
     }
     if (type != SC_MAPPING_TYPE_MOTION) {
@@ -1646,7 +1754,7 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
     SDL_Keycode keys[SC_MAPPING_MAX_KEYS];
     int nkeys = 0;
     if (!is_mouse && !is_motion
-            && !parse_key_expr(key_name, keys, &nkeys, err, errlen)) {
+            && !sc_cond_parse_key_expr(key_name, keys, &nkeys, err, errlen)) {
         return false;
     }
     if (mode == SC_MAPPING_MODE_TOGGLE && nkeys != 1) {
@@ -1654,21 +1762,16 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
         return false;
     }
 
-    // Dependency: a single key or a combo (mouse buttons allowed), never the
-    // entry's own single trigger key.
-    SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS] = { 0 };
-    int dep_nkeys = 0;
-    if (dep != SC_MAPPING_DEP_NONE) {
-        if (!dep_name || !*dep_name) {
-            ERR_MSG("empty dependency key");
-            return false;
-        }
-        if (!parse_key_expr(dep_name, dep_keys, &dep_nkeys, err, errlen)) {
-            return false;
-        }
-        if (nkeys == 1) {
-            for (int i = 0; i < dep_nkeys; i++) {
-                if (dep_keys[i] == keys[0]) {
+    // Dependency conditions: a key, a combo of keys, another mapping entry or
+    // a built-in feature flag. A single-key entry may never depend on its own
+    // trigger key.
+    if (ndeps > 0 && nkeys == 1) {
+        for (int i = 0; i < ndeps; i++) {
+            if (deps[i].kind != SC_COND_KIND_KEY) {
+                continue;
+            }
+            for (int j = 0; j < deps[i].nkeys; j++) {
+                if (deps[i].keys[j] == keys[0]) {
                     ERR_MSG("'%s' depends on itself", key_name);
                     return false;
                 }
@@ -1771,9 +1874,7 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
                                                        : SC_MAPPING_SENSITIVITY_DEFAULT;
     e->hold = e->type == SC_MAPPING_TYPE_MOTION ? hold
                                                 : SC_MOTION_HOLD_BUTTON;
-    e->dep = is_mouse ? SC_MAPPING_DEP_NONE : dep;
-    memcpy(e->dep_keys, dep_keys, sizeof(dep_keys));
-    e->dep_nkeys = is_mouse ? 0 : dep_nkeys;
+    entry_set_deps(e, deps, is_mouse ? 0 : ndeps);
     e->down = false;
     e->active = false;
 
@@ -1785,11 +1886,19 @@ sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name
 bool
 sc_mapping_manager_key_is_dependency(struct sc_mapping_manager *mm,
                                      SDL_Keycode kc) {
+    // Only key conditions need the physical key state to be tracked. Entry
+    // and flag conditions read a state that is maintained on its own.
     for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
         struct sc_mapping_entry *e = &mm->entries[i];
-        if (e->key_name && e->dep != SC_MAPPING_DEP_NONE) {
-            for (int j = 0; j < e->dep_nkeys; j++) {
-                if (e->dep_keys[j] == kc) return true;
+        if (!e->key_name) {
+            continue;
+        }
+        for (int d = 0; d < e->ndeps; d++) {
+            if (e->deps[d].kind != SC_COND_KIND_KEY) {
+                continue;
+            }
+            for (int j = 0; j < e->deps[d].nkeys; j++) {
+                if (e->deps[d].keys[j] == kc) return true;
             }
         }
     }
@@ -1881,10 +1990,12 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
     // (mode / dependency / sensitivity): keep them, only the geometry changes.
     struct sc_mapping_entry *old = find_by_name_impl(mm, key_name);
     enum sc_mapping_mode mode = old ? old->mode : SC_MAPPING_MODE_MOMENTARY;
-    enum sc_mapping_dep dep = old ? old->dep : SC_MAPPING_DEP_NONE;
-    int dep_nkeys = old ? old->dep_nkeys : 0;
-    SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS] = { 0 };
-    if (old) memcpy(dep_keys, old->dep_keys, sizeof(dep_keys));
+    struct sc_mapping_cond deps[SC_COND_MAX_DEPS];
+    int ndeps = 0;
+    if (old) {
+        ndeps = old->ndeps;
+        memcpy(deps, old->deps, sizeof(deps));
+    }
     double sensitivity = old ? old->sensitivity : SC_MAPPING_SENSITIVITY_DEFAULT;
     enum sc_motion_hold hold = old ? old->hold : SC_MOTION_HOLD_BUTTON;
     bool is_virtual = old ? old->is_virtual : false;
@@ -1895,18 +2006,10 @@ sc_mapping_manager_design_bind(struct sc_mapping_manager *mm,
         hold = SC_MOTION_HOLD_BUTTON;
     }
 
-    // Rebuild the dependency name string (single key or combo) for upsert_ex.
-    char dep_name_buf[128] = { 0 };
-    const char *dep_name = NULL;
-    if (dep != SC_MAPPING_DEP_NONE && dep_nkeys > 0) {
-        dep_name = sc_mapping_dep_keys_to_name(dep_keys, dep_nkeys, dep_name_buf,
-                                               sizeof(dep_name_buf));
-    }
-
     bool ok = sc_mapping_manager_upsert_ex(mm, key_name, type,
                                            mm->design_nx, mm->design_ny,
                                            ndx, ndy, duration, mode,
-                                           dep_name, dep, sensitivity, hold,
+                                           deps, ndeps, sensitivity, hold,
                                            is_virtual,
                                            err, sizeof(err));
     if (ok) {

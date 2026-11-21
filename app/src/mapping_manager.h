@@ -7,9 +7,11 @@
 #include <stdint.h>
 #include <SDL3/SDL_keycode.h>
 
+#include "mapping_cond.h"
 #include "util/tick.h"
 
-#define SC_MAPPING_MAX_KEYS 4
+// Maximum number of members of a key combo (entry trigger or dependency).
+#define SC_MAPPING_MAX_KEYS SC_COND_MAX_KEYS
 // A single key may map to several screen positions (simultaneous multi-touch).
 // The server supports MAX_POINTERS = 10; we cap well below that.
 #define SC_MAPPING_MAX_POSITIONS 5
@@ -34,14 +36,6 @@ enum sc_mapping_mode {
     SC_MAPPING_MODE_TOGGLE = 1,    // each press flips the injected state
 };
 
-// Dependency condition: the mapping only exists while the dependency key set
-// is in the requested state.
-enum sc_mapping_dep {
-    SC_MAPPING_DEP_NONE = 0,
-    SC_MAPPING_DEP_PRESSED = 1,  // depends_on must be held
-    SC_MAPPING_DEP_RELEASED = 2, // depends_on must be released
-};
-
 // Lifetime of the synthetic finger created by a motion ("MOUSE_MOVE") entry.
 enum sc_motion_hold {
     SC_MOTION_HOLD_BUTTON = 0, // only while a mouse button is held (default)
@@ -51,10 +45,12 @@ enum sc_motion_hold {
 // Mouse buttons are expressed as synthetic keycodes: real SDL keycodes are
 // never negative, so these can neither collide with nor be produced by a
 // keyboard event. Button numbers follow SDL (1 = left ... 5 = X2).
+// SDL_Keycode is unsigned, so the range test is done on the signed value.
 #define SC_MAPPING_MOUSE_KEY_BASE (-1000)
 #define SC_MAPPING_MOUSE_KEY(button) (SC_MAPPING_MOUSE_KEY_BASE - (button))
 #define SC_MAPPING_KEYCODE_IS_MOUSE(kc) \
-    ((kc) <= SC_MAPPING_MOUSE_KEY(1) && (kc) >= SC_MAPPING_MOUSE_KEY(5))
+    ((int) (kc) <= SC_MAPPING_MOUSE_KEY(1) \
+     && (int) (kc) >= SC_MAPPING_MOUSE_KEY(5))
 #define SC_MAPPING_KEYCODE_MOUSE_BUTTON(kc) \
     (SC_MAPPING_MOUSE_KEY_BASE - (int) (kc))
 
@@ -97,12 +93,12 @@ struct sc_mapping_entry {
     int duration_ms;   // slide only
     double sensitivity; // motion only
     enum sc_motion_hold hold;  // motion only: button-gated or latched look mode
-    // Dependency: the entry is active only while the dependency is in the
-    // requested state. dep_nkeys == 0 means no dependency; dep_nkeys == 1 is
-    // a single key; dep_nkeys > 1 is a combo dependency (all members held).
-    SDL_Keycode dep_keys[SC_MAPPING_MAX_KEYS];
-    int dep_nkeys;
-    enum sc_mapping_dep dep;   // dependency condition
+    // Dependency: the entry is active only while every condition holds.
+    // ndeps == 0 means no dependency. A condition may read a key (a single
+    // key or a combo), another mapping entry ("entry:<name>") or a built-in
+    // feature flag ("flag:<name>").
+    struct sc_mapping_cond deps[SC_COND_MAX_DEPS];
+    int ndeps;
     int32_t pointer_id; // primary pointer id, 0 while unassigned (virtual = 0)
     bool down;         // trigger held (momentary) / logical state (toggle)
     bool active;       // injected press currently outstanding
@@ -236,15 +232,17 @@ sc_mapping_manager_upsert(struct sc_mapping_manager *mm, const char *key_name,
                           double ndx, double ndy, int duration_ms,
                           char *err, size_t errlen);
 
-// Full variant: also sets mode, dependency and motion sensitivity. All the
-// extra parameters are optional (NULL / NONE / 0 keep the defaults).
+// Full variant: also sets mode, dependency conditions and motion sensitivity.
+// All the extra parameters are optional (NULL / 0 / ndeps == 0 keep the
+// defaults). deps is an array of ndeps dependency conditions; every one of
+// them must hold for the entry to be active.
 // is_virtual creates a virtual key (no touch injection, state only).
 bool
 sc_mapping_manager_upsert_ex(struct sc_mapping_manager *mm, const char *key_name,
                              enum sc_mapping_entry_type type, double nx,
                              double ny, double ndx, double ndy, int duration_ms,
                              enum sc_mapping_mode mode,
-                             const char *dep_name, enum sc_mapping_dep dep,
+                             const struct sc_mapping_cond *deps, int ndeps,
                              double sensitivity, enum sc_motion_hold hold,
                              bool is_virtual,
                              char *err, size_t errlen);
@@ -298,17 +296,15 @@ sc_mapping_parse_key_name(const char *name);
 const char *
 sc_mapping_key_name(SDL_Keycode kc);
 
-// Render a keycode array as a "A+B+C" expression. Writes into buf (caller
-// provided) and returns it, or NULL when nkeys <= 0. Used to round-trip a
-// combo dependency through the string-based upsert API.
-const char *
-sc_mapping_dep_keys_to_name(const SDL_Keycode *keys, int nkeys, char *buf,
-                            size_t buflen);
-
 // Validate a key expression ("a", "W+A", "MOUSE_RIGHT") with the same grammar
 // as the loader. On failure, writes a reason into err.
 bool
 sc_mapping_validate_key_expr(const char *name, char *err, size_t errlen);
+
+// Validate a dependency reference ("lshift", "entry:VIRT", "flag:look_mode").
+// On failure, writes a reason into err.
+bool
+sc_mapping_validate_cond_ref(const char *expr, char *err, size_t errlen);
 
 char *
 sc_mapping_get_base_dir(void);

@@ -54,8 +54,8 @@
 | `dy` | number | slide 必填 | 归一化纵向位移，闭区间 `[-1,1]`，可为负。 |
 | `duration_ms` | number | 否 | 仅 slide 有意义。缺省 200；加载时夹到 `[50,5000]`。整数截断（`(int)`）。 |
 | `mode` | string | 否 | `"momentary"`（默认）或 `"toggle"`；其它值拒绝。`toggle` 只允许单键 `touch` 条目（鼠标按键可以，组合键 / slide / motion / `MOUSE_LEFT_LOCKED` 拒绝）。虚拟键也支持 `toggle`。 |
-| `depends_on` | string | 否 | 依赖键：单个键名、鼠标按键名，或组合键文法（如 `"lshift+a"`）。组合依赖要求所有成员同时按下。见第 6.2 节。 |
-| `depends_state` | string | 否 | `"pressed"`（默认）或 `"released"`；其它值拒绝。没有 `depends_on` 时出现 → 拒绝。 |
+| `depends_on` | string 或 array | 否 | 依赖条件。可以是单个键名、鼠标按键名、组合键文法（如 `"lshift+a"`），也可以是 `entry:<条目名>`（依赖另一个映射条目的逻辑状态）或 `flag:<功能名>`（依赖内置功能标志）。写成数组时表示**多个条件同时成立**（逻辑与）。见第 6.2 节。 |
+| `depends_state` | string 或 array | 否 | 每个条件要求的状态：键条件用 `"pressed"`（默认）/ `"released"`，条目条件用 `"active"` / `"inactive"`，功能标志用 `"on"` / `"off"`（各条件之间可以混用同义词）。写成数组时必须与 `depends_on` 的条目一一对应。没有 `depends_on` 时出现 → 拒绝。 |
 | `sensitivity` | number | 否 | 仅 `type: "motion"` 允许，其它类型给出该字段 → 拒绝。缺省 `1.0`，有效范围 `[0.05, 20.0]`，越界夹取（加载时 `LOGW` 告警；面板编辑静默夹取）。见第 9 节。 |
 | `hold` | string | 否 | 仅 `type: "motion"` 允许。`"button"`（默认）表示只在按住鼠标键时才有虚拟手指；`"always"` 是**视角模式**：从第一次鼠标移动起虚拟手指按住，到边界自动回起点继续转，直到映射停止。见第 9.4 节。 |
 
@@ -72,16 +72,20 @@
 7. `x`/`y`：两者都是 number 时校验范围；只出现一个或类型不对 → `'x'/'y' must both be numbers`；两者都缺失时只有 `motion` 或 `virtual` 允许（motion 使用默认 `0.5, 0.5`，virtual 不使用坐标），其它类型拒绝（`missing or invalid 'x'/'y'`）。越界 `[0,1]` **不夹取**，直接拒绝。
 8. `positions` 若存在必须是数组；virtual 条目出现 → 拒绝（`virtual keys cannot have 'positions'`）；每个元素必须是含 2 个数字的 `[x, y]` 对，越界 `[0,1]` 拒绝；额外位置数 > 4 拒绝（含主位置最多 5 个）。
 9. `mode` 非 string 或值未知 → 拒绝。
-10. `depends_on` 非空 string，用 `parse_key_expr()` 解析（支持单键或组合键），解析失败 → 拒绝。`depends_state` 规则见上表。
+10. `depends_on` 必须是 string 或 array（见第 6.2 节）：string 用 `sc_cond_parse_ref()` 解析（键名 / 组合键 / `entry:` / `flag:`），array 的每个元素同样逐个解析，元素数 1..4；解析失败 → 拒绝。`depends_state` 规则见上表：string 作用于全部条件，array 必须与条件个数一致。
 11. `sensitivity` 非 number → 拒绝；非 motion 类型出现 → 拒绝（`'sensitivity' is only valid for type 'motion'`）；数值夹到 `[0.05, 20.0]` 并 `LOGW` 告警。
 12. `hold` 非 string → 拒绝；非 motion 类型出现 → 拒绝（`'hold' is only valid for type 'motion'`）；取值不是 `button` / `always` → 拒绝（`unknown hold '...'`）。
 13. 鼠标保留字 `MOUSE_LEFT_LOCKED` / `LEFT_CLICK_LOCKED` 的特殊分支：不允许 slide/motion（`cannot be a slide` / `cannot be a motion`）、不允许 `mode: toggle`、不允许 `depends_on`。
 14. `type: "motion"` 分支：不允许 `mode: toggle`；其余字段（`depends_on`、`hold`）允许。
 15. 其余键名走键表达式文法（第 5 节）；解析失败拒绝。**鼠标按键名也算单键**。
 16. `mode: toggle` 要求单键：组合键拒绝（`'mode: toggle' requires a single key, not a combo`）；slide 拒绝（`'mode: toggle' is not supported for slides`）。
-17. 单键条目的 `depends_on` 任一成员与自身触发键相同 → 拒绝（`'...' depends on itself`）。
+17. 单键条目的 `depends_on` 任一**键条件**成员与自身触发键相同 → 拒绝（`'...' depends on itself`）。
 18. slide：`key` 必须是单个键（组合键拒绝）；`dx`/`dy` 必须都是 number 且落在 `[-1,1]`；`duration_ms` 若存在必须是 number，然后夹取到 `[50,5000]`（夹取只告警，不拒绝）。
 19. 跨条目规则：slide 键不得同时作为某个组合键的成员，否则该 slide 条目被拒绝（`slide key '...' is also used in a combo`）。
+20. 跨条目规则（依赖条件，整条模板解析完后统一校验）：
+    - `entry:<名>` 指向的条目必须存在于同一模板中，否则引用它的条目被拒绝（`unknown dependency entry '...'`）；
+    - 条目不能依赖自己（`'...' depends on itself`）；
+    - 依赖链不能成环（A 依赖 B、B 依赖 A），否则相关条目被拒绝（`dependency cycle through '...'`）。
 
 所有拒绝都会 `LOGW` 一行（含模板路径与条目下标），并计入该模板的失败统计：
 `sc_mapping_manager.last_load` 的 `fail` 计数与最多 16 条 `msgs` 文本，
@@ -172,31 +176,81 @@
 
 保存时 `key` 原样写回内存中的字符串（`key_name`），不做规范化：`Ctrl+A` 保存后仍是 `Ctrl+A`。
 
-### 6.2 依赖键（`depends_on`）
+### 6.2 依赖条件（`depends_on`）
 
-- 接受**单个**键名、鼠标按键名，或组合键文法（如 `"lshift+a"`），
-  用 `parse_key_expr()` 解析；解析失败直接拒绝。
-- 组合依赖：所有成员同时按下时满足条件。
-- 不允许依赖条目自身的单键触发键（`depends on itself`）。
-- 若依赖目标是**虚拟键**，依赖条件检查的是虚拟键的逻辑状态
-  （`down` 字段），而非物理按键状态——这使得 toggle 虚拟键可作为开关。
+依赖条件由**一个源**和**要求的状态**组成。源有三种，条目可以同时挂多个条件
+（全部成立才生效，逻辑与）。
+
+| 源类型 | 写法 | 读取的状态 |
+| --- | --- | --- |
+| 键 | `"A"`、`"MOUSE_RIGHT"`、`"lshift+a"`、`"key:lshift+a"` | 物理按键是否按住；组合键要求**所有成员**同时按住 |
+| 条目 | `"entry:<条目名>"` | 该映射条目的**逻辑状态**（`down`/`active`：瞬时映射=按住，toggle=翻转后的状态） |
+| 功能标志 | `"flag:<功能名>"` | 内置功能标志的开关状态 |
+
+写法细则：
+
+- 前缀 `key:` / `entry:` / `flag:` 大小写不敏感；`key:` 之后的文本仍是完整
+  的键表达式文法（可含组合）。
+- 不带前缀的字符串一律按**键**解释（与旧模板完全兼容）。
+- `entry:` / `flag:` 后面是源名称，前后空白会被去掉；名称最长 47 字节。
+- `depends_on` 也可以写成数组，元素是上面的任意一种写法，最多 4 个：
+
+  ```json
+  "depends_on": ["lshift", "entry:WPN", "flag:look_mode"]
+  ```
+
+- `depends_state` 决定每个条件要求的**相反**状态：
+
+  | 取值 | 含义 |
+  | --- | --- |
+  | `pressed` / `active` / `on` / `enabled` | 源为“开”时条件成立（缺省） |
+  | `released` / `inactive` / `off` / `disabled` | 源为“关”时条件成立 |
+
+  各源之间可以混用同义词；`depends_state` 写成数组时必须与 `depends_on`
+  的条件个数一致（一一对应）。
+
+- 不允许依赖条目自身的单键触发键（`depends on itself`）；`entry:` 指向的
+  条目必须存在于同一模板中；依赖链不能成环（见第 3 节第 20 条）。
+
+#### 6.2.1 内置功能标志（`flag:`）
+
+内置功能在注册表（`sc_cond_flag_register()`）里登记一个具名布尔量后，即可
+被 `depends_on` 引用。**后加的功能只需要注册一个标志**，不必再改动依赖
+计算本身：模板解析器按名字解析，运行时通过同一个注册表求值。
+
+| 标志名 | 含义 |
+| --- | --- |
+| `mapping.enabled` | 映射总开关已打开 |
+| `mapping.design` | 设计模式（F3）进行中 |
+| `mapping.panel` | 管理面板（F5）已打开 |
+| `mapping.switch` | 模板切换弹窗（F2）已打开 |
+| `look_mode` | **视角模式**正在驱动手指（`MOUSE_MOVE` 条目为 `hold: "always"` 且虚拟手指已按下） |
+| `motion.active` | 鼠标位移映射正在驱动手指（视角模式或按住鼠标键拖动） |
+| `slide.active` | 至少有一个 hold-to-slide 滑动正在运行 |
+| `mouse.left_locked` | 左键锁定已开启 |
+| `mouse.any_down` | 任意鼠标键处于按下状态 |
+| `device.connected` | 设备已连接 |
+| `device.paused` | 画面已暂停 |
+| `camera` | 摄像头镜像模式 |
+| `vfinger` | 虚拟手指（Alt+拖动）处于按下状态 |
+
+未注册的标志名在加载时被拒绝（`unknown feature flag '...'`）。
+
+#### 6.2.2 运行时行为
+
 - 依赖键可以**没有**自己的映射条目：这类键仍会被跟踪按下状态
   （`sc_mapping_manager_key_is_dependency()`），并且按键事件继续正常转发。
-- `depends_state` 缺省 `pressed`：
-
-| 取值 | 含义 |
-| --- | --- |
-| `pressed` | 依赖键处于按下状态时映射才存在 |
-| `released` | 依赖键处于松开状态时映射才存在 |
-
-运行时行为（`evaluate_dependencies()`）：
-
+- 若依赖目标是**虚拟键**（`entry:` 指向一个 `virtual: true` 条目），
+  依赖条件检查的是该虚拟键的逻辑状态，而非物理按键状态——这使得 toggle
+  虚拟键可作为开关。
 - 触发键按下时依赖不满足 → 不产生映射，日志
-  `Mapping '...' not entered: dependency '...' is not pressed/released`。
+  `Mapping '...' not entered: dependency '...' is not satisfied`。
 - 映射已激活后依赖丢失 → 立即退出映射并补发一次 UP（`Mapping '...' released: dependency lost`），不会漏发。
 - 依赖重新满足时：
   - `momentary` 条目在触发键仍按住的情况下自动重新进入；
   - `toggle` 条目**不会**自动重新按下，必须等下一次显式按下边沿。
+- 功能标志类条件没有“重新满足”的事件源：标志变化本身不触发重新求值，
+  标志会在下一次按键 / 鼠标事件时随 `evaluate_dependencies()` 一起被检查。
 
 ## 7. 鼠标按键与保留字
 
@@ -434,8 +488,12 @@ dny = yrel * sensitivity / frame_height
 
 注意两点：
 
-- `depends_on` 保存的是规范键名（来自 `sc_mapping_key_name()`），例如模板里
-  写 `MOUSE_BUTTON4`，保存后变成 `MOUSE_X1`；`esc` 变成 `Escape`。语义不变。
+- `depends_on` 保存的是规范形式（来自 `sc_cond_to_name()`）：键条件写规范键名
+  （来自 `sc_mapping_key_name()`），例如模板里写 `MOUSE_BUTTON4`，保存后变成
+  `MOUSE_X1`；`esc` 变成 `Escape`。条目条件写 `entry:<名>`，功能标志写
+  `flag:<名>`。语义不变。
+- 只有**一个**条件时，`depends_on` 写成字符串、`depends_state` 写成字符串；
+  **多个**条件时两者都写成数组（顺序一一对应）。
 - 未识别的额外字段仍会被丢弃（保存只写上述字段），这一点与本次新增字段无关。
 
 写盘策略：
@@ -474,11 +532,20 @@ dny = yrel * sensitivity / frame_height
 | `mode: toggle` + slide | 该条拒绝：`'mode: toggle' is not supported for slides`。 |
 | `mode: toggle` + motion | 该条拒绝：`'mode: toggle' is not supported for motion`。 |
 | `MOUSE_LEFT_LOCKED` + `mode: toggle` | 该条拒绝：`cannot use 'mode: toggle'`。 |
-| `depends_on` 非字符串/空 | 该条拒绝：`missing or invalid 'depends_on'`。 |
-| `depends_on` 键表达式解析失败 | 该条拒绝：`parse error in key expression '...'`。 |
+| `depends_on` 既非字符串也非数组 | 该条拒绝：`'depends_on' must be a string or an array of strings`。 |
+| `depends_on` 字符串为空 | 该条拒绝：`missing or invalid 'depends_on'`。 |
+| `depends_on` 数组为空 / 元素非字符串或为空 | 该条拒绝：`'depends_on' array must not be empty` / `each dependency must be a non-empty string`。 |
+| `depends_on` 条件数 > 4 | 该条拒绝：`too many dependencies (N > 4)`。 |
+| `depends_on` 键表达式解析失败 | 该条拒绝：`unknown key '...'` / `unknown key '...' in '...'` 等（来自 `sc_cond_parse_key_expr()`）。 |
+| `depends_on` 引用了未注册的功能标志 | 该条拒绝：`unknown feature flag '...'`。 |
+| `depends_on` 的 `entry:` / `flag:` 缺少源名称 | 该条拒绝：`'entry:' requires a source name` / `'flag:' requires a feature name`。 |
 | `depends_state` 没有 `depends_on` | 该条拒绝：`'depends_state' requires 'depends_on'`。 |
-| `depends_state` 非字符串/未知值 | 该条拒绝：`'depends_state' must be a string` / `unknown depends_state '...'`。 |
+| `depends_state` 非字符串/非数组/未知值 | 该条拒绝：`'depends_state' must be a string or an array` / `unknown depends_state '...'`。 |
+| `depends_state` 数组长度与 `depends_on` 条件数不一致 | 该条拒绝：`'depends_state' has N entries but 'depends_on' has M`。 |
 | 条目依赖自身触发键 | 该条拒绝：`'...' depends on itself`。 |
+| `entry:` 指向的条目不在模板中 | 该条拒绝：`unknown dependency entry '...'`。 |
+| `entry:` 指向自己 | 该条拒绝：`'...' depends on itself`。 |
+| 依赖链成环（A→B→A） | 该条拒绝：`dependency cycle through '...'`。 |
 | `MOUSE_LEFT_LOCKED` + `depends_on` | 该条拒绝：`cannot use 'depends_on'`。 |
 | `sensitivity` 非数字 | 该条拒绝：`'sensitivity' must be a number`。 |
 | `sensitivity` 出现在非 motion 条目 | 该条拒绝：`'sensitivity' is only valid for type 'motion'`。 |
@@ -497,9 +564,9 @@ dny = yrel * sensitivity / frame_height
 | 条目数 > 256 | 超出部分逐条拒绝：`mapping table full`。 |
 
 管理面板（F5）编辑走 `sc_mapping_manager_upsert_ex()`，它复用同一套
-`parse_key_expr()` 与区间检查，另外在保存前拦截：空键名、`x`/`y` 越界、
+`sc_cond_parse_key_expr()` 与区间检查，另外在保存前拦截：空键名、`x`/`y` 越界、
 组合超限、slide 用组合键、slide/组合键冲突、鼠标锁定条目设为 slide、
-toggle 用于非单键 touch、依赖为组合键或依赖自身、灵敏度仅 motion 可设。
+toggle 用于非单键 touch、依赖条件引用自身触发键、灵敏度仅 motion 可设。
 
 > 同一规则在加载器与管理面板里的**措辞**可能略有不同（例如 toggle 用于
 > slide 时加载器报 `'mode: toggle' is not supported for slides ('...')`，
@@ -508,7 +575,9 @@ toggle 用于非单键 touch、依赖为组合键或依赖自身、灵敏度仅 
 面板按键：`1`-`6` 编辑字段、`Enter` 提交、`N` 新建（再按一个键）、
 `V` 新建 `MOUSE_MOVE`、`T` 切换 touch/slide、`M` 切换 momentary/toggle、
 `H` 切换 hold（`button` / `always`，仅 motion）、
-`D` 循环依赖（无 → 按键捕获 pressed → released → 无）、`S` 保存。
+`D` 循环依赖（无 → 按键捕获 pressed → released → 无；对 `flag:` 依赖则是 on → off → on）、
+`G` 在已注册的内置功能里循环选择，作为该条目的依赖（替换当前依赖）、
+`S` 保存。
 面板编辑只改内存，按 `S`（或关闭面板时若脏）才写回文件。
 
 ## 14. 配置文件的快捷键字段（不属于模板，但同目录同机制）

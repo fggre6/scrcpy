@@ -516,18 +516,29 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
 
 // ==================== 映射激活 / 依赖 ====================
 
-// Render an entry's dependency key set as "A+B+C" for log messages. The
-// manager-side helper is static, so keep a tiny local copy.
+// Render the dependency conditions of an entry for log messages, e.g.
+// "lshift pressed" or "flag:look_mode on".
 static void
-dep_keys_to_name_log(const struct sc_mapping_entry *e, char *buf,
-                     size_t buflen) {
+dep_conds_to_name_log(const struct sc_mapping_entry *e, char *buf,
+                      size_t buflen) {
     buf[0] = '\0';
-    if (!e || e->dep_nkeys <= 0 || buflen == 0) return;
+    if (!e || e->ndeps <= 0 || buflen == 0) {
+        return;
+    }
     size_t off = 0;
-    for (int i = 0; i < e->dep_nkeys && off < buflen - 1; i++) {
-        const char *n = sc_mapping_key_name(e->dep_keys[i]);
-        if (i > 0 && off < buflen - 1) buf[off++] = '+';
-        while (*n && off < buflen - 1) buf[off++] = *n++;
+    for (int i = 0; i < e->ndeps; i++) {
+        char name[128];
+        sc_cond_to_name(&e->deps[i], name, sizeof(name));
+        int n = snprintf(buf + off, buflen - off, "%s%s %s",
+                         i > 0 ? ", " : "", name,
+                         sc_cond_state_name(&e->deps[i]));
+        if (n < 0) {
+            break;
+        }
+        off += (size_t) n;
+        if (off >= buflen - 1) {
+            break;
+        }
     }
     buf[off] = '\0';
 }
@@ -549,21 +560,64 @@ key_held(struct sc_input_manager *im, SDL_Keycode kc) {
     return im->g_pressed[kc & 0xFF];
 }
 
-// True when a dependency key set is fully satisfied. For a single key this is
-// just key_held(); for a combo every member must be held.
+// Evaluate the *source* of a dependency condition: true when the source is
+// "on". A key source is on when it is held (a combo is on when every member
+// is held), an entry source is on when the referenced entry is logically
+// active, a flag source is on when the registered feature flag is set.
 static bool
-dep_keys_held(struct sc_input_manager *im, const struct sc_mapping_entry *e) {
-    for (int i = 0; i < e->dep_nkeys; i++) {
-        if (!key_held(im, e->dep_keys[i])) return false;
+cond_source_on(struct sc_input_manager *im,
+               const struct sc_mapping_cond *c) {
+    if (!c) {
+        return false;
     }
-    return e->dep_nkeys > 0;
+    switch (c->kind) {
+        case SC_COND_KIND_KEY:
+            for (int i = 0; i < c->nkeys; i++) {
+                if (!key_held(im, c->keys[i])) {
+                    return false;
+                }
+            }
+            return c->nkeys > 0;
+        case SC_COND_KIND_ENTRY: {
+            // The referenced entry may have been replaced by a hot-reload, so
+            // it is looked up by name every time.
+            struct sc_mapping_entry *t =
+                sc_mapping_manager_find_by_name(mm_of(im), c->name);
+            if (!t) {
+                return false;
+            }
+            // "down" is the logical state (momentary: held, toggle: flipped),
+            // "active" covers the entries whose injection is running.
+            return t->down || t->active;
+        }
+        case SC_COND_KIND_FLAG: {
+            const struct sc_cond_flag_def *d = sc_cond_flag_find(c->name);
+            if (!d || !d->fn) {
+                return false;
+            }
+            return d->fn(sc_cond_flag_ctx());
+        }
+    }
+    return false;
 }
 
+// True when every dependency condition of the entry is satisfied.
 static bool
 dep_ok(struct sc_input_manager *im, struct sc_mapping_entry *e) {
-    if (e->dep == SC_MAPPING_DEP_NONE) return true;
-    bool held = dep_keys_held(im, e);
-    return e->dep == SC_MAPPING_DEP_PRESSED ? held : !held;
+    if (!e) {
+        return true;
+    }
+    for (int i = 0; i < e->ndeps; i++) {
+        bool on = cond_source_on(im, &e->deps[i]);
+        if (e->deps[i].state == SC_COND_STATE_ON) {
+            if (!on) {
+                return false;
+            }
+        } else if (on) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Physical state of the entry's own trigger (mouse buttons included).
@@ -579,11 +633,10 @@ static void
 entry_activate(struct sc_input_manager *im, struct sc_mapping_entry *e) {
     if (!e || e->active) return;
     if (!dep_ok(im, e)) {
-        char depname[128] = "?";
-        dep_keys_to_name_log(e, depname, sizeof(depname));
-        LOGI("Mapping '%s' not entered: dependency '%s' is not %s",
-             e->key_name, depname,
-             e->dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
+        char depname[160] = "?";
+        dep_conds_to_name_log(e, depname, sizeof(depname));
+        LOGI("Mapping '%s' not entered: dependency '%s' is not satisfied",
+             e->key_name, depname);
         return;
     }
     e->active = true;
@@ -628,7 +681,7 @@ evaluate_dependencies(struct sc_input_manager *im) {
     struct sc_mapping_manager *mm = mm_of(im);
     for (int i = 0; i < SC_MAPPING_MAX_ENTRIES; i++) {
         struct sc_mapping_entry *e = &mm->entries[i];
-        if (!e->key_name || e->dep == SC_MAPPING_DEP_NONE) continue;
+        if (!e->key_name || e->ndeps == 0) continue;
         if (e->nkeys >= 2) continue; // combos: handled inside update_combos()
         if (!dep_ok(im, e)) {
             if (e->active || e->down) {
@@ -824,30 +877,27 @@ manager_selected_entry(struct sc_input_manager *im) {
 static bool
 manager_apply(struct sc_input_manager *im, struct sc_mapping_entry *e,
               double nx, double ny, double ndx, double ndy, int duration_ms,
-              enum sc_mapping_mode mode, const SDL_Keycode *dep_keys,
-              int dep_nkeys, enum sc_mapping_dep dep, double sensitivity,
-              enum sc_motion_hold hold, char *err, size_t errlen) {
-    char depname[128];
-    const char *dep_name = NULL;
-    if (dep != SC_MAPPING_DEP_NONE && dep_nkeys > 0) {
-        dep_name = sc_mapping_dep_keys_to_name(dep_keys, dep_nkeys, depname,
-                                               sizeof(depname));
-    }
+              enum sc_mapping_mode mode,
+              const struct sc_mapping_cond *deps, int ndeps,
+              double sensitivity, enum sc_motion_hold hold, char *err,
+              size_t errlen) {
     return sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, e->type,
                                         nx, ny, ndx, ndy, duration_ms, mode,
-                                        dep_name, dep, sensitivity, hold,
+                                        deps, ndeps, sensitivity, hold,
                                         e->is_virtual, err, errlen);
 }
 
+// Replace the dependency conditions of an entry with a single key condition.
 static void
 manager_set_dep(struct sc_input_manager *im, struct sc_mapping_entry *e,
-                SDL_Keycode dep_key, enum sc_mapping_dep dep) {
+                SDL_Keycode dep_key, enum sc_mapping_cond_state state) {
     struct sc_overlay *ov = ov_of(im);
     char err[128];
-    SDL_Keycode dk[1] = { dep_key };
-    int dnk = (dep == SC_MAPPING_DEP_NONE) ? 0 : 1;
+    struct sc_mapping_cond cond;
+    memset(&cond, 0, sizeof(cond));
+    sc_cond_init_key(&cond, dep_key, state);
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       e->mode, dk, dnk, dep, e->sensitivity, e->hold,
+                       e->mode, &cond, 1, e->sensitivity, e->hold,
                        err, sizeof(err))) {
         char msg[192];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -855,15 +905,93 @@ manager_set_dep(struct sc_input_manager *im, struct sc_mapping_entry *e,
         LOGW("Manager dependency rejected: %s", err);
         return;
     }
-    if (dep == SC_MAPPING_DEP_NONE) {
-        sc_overlay_manager_set_hint(ov, "Dependency cleared (press S to save)");
-    } else {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "Depends on %s %s (press S to save)",
-                 sc_mapping_key_name(dep_key),
-                 dep == SC_MAPPING_DEP_RELEASED ? "released" : "pressed");
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Depends on %s %s (press S to save)",
+             sc_mapping_key_name(dep_key),
+             state == SC_COND_STATE_OFF ? "released" : "pressed");
+    sc_overlay_manager_set_hint(ov, msg);
+}
+
+// Replace the dependency conditions of an entry with a single built-in
+// feature flag condition.
+static void
+manager_set_flag_dep(struct sc_input_manager *im, struct sc_mapping_entry *e,
+                     const char *name, enum sc_mapping_cond_state state) {
+    struct sc_overlay *ov = ov_of(im);
+    char err[128];
+    struct sc_mapping_cond cond;
+    memset(&cond, 0, sizeof(cond));
+    cond.kind = SC_COND_KIND_FLAG;
+    cond.state = state;
+    snprintf(cond.name, sizeof(cond.name), "%s", name);
+    if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
+                       e->mode, &cond, 1, e->sensitivity, e->hold,
+                       err, sizeof(err))) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
         sc_overlay_manager_set_hint(ov, msg);
+        LOGW("Manager dependency rejected: %s", err);
+        return;
     }
+    char msg[192];
+    snprintf(msg, sizeof(msg), "Depends on flag:%s %s (press S to save)", name,
+             state == SC_COND_STATE_OFF ? "off" : "on");
+    sc_overlay_manager_set_hint(ov, msg);
+}
+
+// G cycles through the registered built-in features and makes the selected
+// one the dependency of the entry.
+static void
+manager_cycle_flag_dep(struct sc_input_manager *im) {
+    struct sc_overlay *ov = ov_of(im);
+    struct sc_mapping_entry *e = manager_selected_entry(im);
+    if (!e) {
+        sc_overlay_manager_set_hint(ov, "No entry selected");
+        return;
+    }
+    int count = sc_cond_flag_count();
+    if (count <= 0) {
+        sc_overlay_manager_set_hint(ov, "No built-in feature registered");
+        return;
+    }
+    // Continue after the flag that is currently used, or start at the first.
+    int next = 0;
+    if (e->ndeps > 0 && e->deps[0].kind == SC_COND_KIND_FLAG) {
+        for (int i = 0; i < count; i++) {
+            const struct sc_cond_flag_def *d = sc_cond_flag_at(i);
+            if (d && !strcmp(d->name, e->deps[0].name)) {
+                next = (i + 1) % count;
+                break;
+            }
+        }
+    }
+    const struct sc_cond_flag_def *d = sc_cond_flag_at(next);
+    if (!d) {
+        sc_overlay_manager_set_hint(ov, "No built-in feature registered");
+        return;
+    }
+    manager_set_flag_dep(im, e, d->name, SC_COND_STATE_ON);
+    char msg[256];
+    snprintf(msg, sizeof(msg), "flag %d/%d: %s - %s", next + 1, count, d->name,
+             d->desc);
+    sc_overlay_manager_set_hint(ov, msg);
+}
+
+// Clear every dependency condition of an entry.
+static void
+manager_clear_dep(struct sc_input_manager *im, struct sc_mapping_entry *e) {
+    struct sc_overlay *ov = ov_of(im);
+    char err[128];
+    if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
+                       e->mode, NULL, 0, e->sensitivity, e->hold,
+                       err, sizeof(err))) {
+        char msg[192];
+        snprintf(msg, sizeof(msg), "Rejected: %s", err);
+        sc_overlay_manager_set_hint(ov, msg);
+        LOGW("Manager dependency rejected: %s", err);
+        return;
+    }
+    sc_overlay_manager_set_hint(ov, "Dependency cleared (press S to save)");
 }
 
 static void
@@ -917,7 +1045,8 @@ manager_open(struct sc_input_manager *im) {
         }
     }
     sc_overlay_manager_set_hint(ov,
-        "1-6 edit field, Enter commit, N new, V motion, M mode, D depend");
+        "1-6 edit field, Enter commit, N new, V motion, M mode, D depend, "
+        "G feature");
     LOGI("Manager panel opened");
 }
 
@@ -991,8 +1120,8 @@ manager_commit_edit(struct sc_input_manager *im) {
     else if (field == 5) sens = v;
 
     char err[128];
-    if (!manager_apply(im, e, nx, ny, ndx, ndy, dur, e->mode, e->dep_keys,
-                       e->dep_nkeys, e->dep, sens, e->hold,
+    if (!manager_apply(im, e, nx, ny, ndx, ndy, dur, e->mode, e->deps,
+                       e->ndeps, sens, e->hold,
                        err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1022,7 +1151,7 @@ manager_create_entry(struct sc_input_manager *im, const char *key_name) {
     bool ok = existing
         ? manager_apply(im, existing, nx, ny, existing->ndx, existing->ndy,
                         existing->duration_ms, existing->mode,
-                        existing->dep_keys, existing->dep_nkeys, existing->dep,
+                        existing->deps, existing->ndeps,
                         existing->sensitivity, existing->hold,
                         err, sizeof(err))
         : sc_mapping_manager_upsert(mm, key_name, SC_MAPPING_TYPE_TOUCH,
@@ -1059,7 +1188,7 @@ manager_create_motion(struct sc_input_manager *im) {
     if (!sc_mapping_manager_upsert_ex(mm, "MOUSE_MOVE",
                                       SC_MAPPING_TYPE_MOTION, nx, ny,
                                       0.0, 0.0, 0, SC_MAPPING_MODE_MOMENTARY,
-                                      NULL, SC_MAPPING_DEP_NONE,
+                                      NULL, 0,
                                       SC_MAPPING_SENSITIVITY_DEFAULT,
                                       SC_MOTION_HOLD_BUTTON, false,
                                       err, sizeof(err))) {
@@ -1121,15 +1250,9 @@ manager_toggle_type(struct sc_input_manager *im) {
                              ? SC_MAPPING_MODE_MOMENTARY : e->mode;
 
     char err[128];
-    char depname[128];
-    const char *dep_name = NULL;
-    if (e->dep != SC_MAPPING_DEP_NONE && e->dep_nkeys > 0) {
-        dep_name = sc_mapping_dep_keys_to_name(e->dep_keys, e->dep_nkeys,
-                                               depname, sizeof(depname));
-    }
     if (!sc_mapping_manager_upsert_ex(mm_of(im), e->key_name, new_type,
                                       e->nx, e->ny, ndx, ndy, dur, mode,
-                                      dep_name, e->dep, e->sensitivity,
+                                      e->deps, e->ndeps, e->sensitivity,
                                       SC_MOTION_HOLD_BUTTON, e->is_virtual,
                                       err, sizeof(err))) {
         char msg[160];
@@ -1173,7 +1296,7 @@ manager_pick_point(struct sc_input_manager *im, double nx, double ny) {
     }
     char err[128];
     if (!manager_apply(im, e, x, y, dx, dy, e->duration_ms, e->mode,
-                       e->dep_keys, e->dep_nkeys, e->dep, e->sensitivity,
+                       e->deps, e->ndeps, e->sensitivity,
                        e->hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1202,7 +1325,7 @@ manager_toggle_mode(struct sc_input_manager *im) {
                               : SC_MAPPING_MODE_TOGGLE;
     char err[128];
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       mode, e->dep_keys, e->dep_nkeys, e->dep,
+                       mode, e->deps, e->ndeps,
                        e->sensitivity, e->hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1234,7 +1357,7 @@ manager_toggle_hold(struct sc_input_manager *im) {
                              : SC_MOTION_HOLD_ALWAYS;
     char err[128];
     if (!manager_apply(im, e, e->nx, e->ny, e->ndx, e->ndy, e->duration_ms,
-                       e->mode, e->dep_keys, e->dep_nkeys, e->dep,
+                       e->mode, e->deps, e->ndeps,
                        e->sensitivity, hold, err, sizeof(err))) {
         char msg[160];
         snprintf(msg, sizeof(msg), "Rejected: %s", err);
@@ -1247,6 +1370,7 @@ manager_toggle_hold(struct sc_input_manager *im) {
 }
 
 // D cycles: no dependency -> capture key (pressed) -> released -> none.
+// Only the first condition is edited; the others are kept untouched.
 static void
 manager_cycle_dep(struct sc_input_manager *im) {
     struct sc_overlay *ov = ov_of(im);
@@ -1255,15 +1379,30 @@ manager_cycle_dep(struct sc_input_manager *im) {
         sc_overlay_manager_set_hint(ov, "No entry selected");
         return;
     }
-    if (e->dep == SC_MAPPING_DEP_NONE) {
+    if (e->ndeps == 0) {
         ov->mgr_capture_dep = true;
         sc_overlay_manager_set_hint(ov,
             "Press the dependency key (Esc cancels)");
-    } else if (e->dep == SC_MAPPING_DEP_PRESSED) {
-        manager_set_dep(im, e, e->dep_keys[0], SC_MAPPING_DEP_RELEASED);
-    } else {
-        manager_set_dep(im, e, 0, SC_MAPPING_DEP_NONE);
+        return;
     }
+    struct sc_mapping_cond first = e->deps[0];
+    if (first.kind == SC_COND_KIND_KEY && first.nkeys == 1) {
+        // pressed -> released -> none
+        if (first.state == SC_COND_STATE_ON) {
+            manager_set_dep(im, e, first.keys[0], SC_COND_STATE_OFF);
+        } else {
+            manager_clear_dep(im, e);
+        }
+        return;
+    }
+    if (first.kind == SC_COND_KIND_FLAG) {
+        // on -> off -> on
+        manager_set_flag_dep(im, e, first.name,
+                             first.state == SC_COND_STATE_ON
+                                 ? SC_COND_STATE_OFF : SC_COND_STATE_ON);
+        return;
+    }
+    manager_clear_dep(im, e);
 }
 
 // Returns true when the key was consumed by the panel.
@@ -1280,7 +1419,7 @@ manager_handle_key(struct sc_input_manager *im, SDL_Keycode kc) {
         } else if (kc == SDLK_ESCAPE) {
             sc_overlay_manager_set_hint(ov, "Cancelled");
         } else {
-            manager_set_dep(im, e, kc, SC_MAPPING_DEP_PRESSED);
+            manager_set_dep(im, e, kc, SC_COND_STATE_ON);
         }
         return true;
     }
@@ -1371,6 +1510,9 @@ manager_handle_key(struct sc_input_manager *im, SDL_Keycode kc) {
     case SDLK_D:
         manager_cycle_dep(im);
         return true;
+    case SDLK_G:
+        manager_cycle_flag_dep(im);
+        return true;
     case SDLK_V:
         manager_create_motion(im);
         return true;
@@ -1450,6 +1592,142 @@ overlay_manager_open(struct sc_input_manager *im) {
     return ov_of(im)->mode == SC_OVERLAY_MANAGER;
 }
 
+// ==================== 内置功能标志（依赖源） ====================
+//
+// 每个内置功能只需要在这里注册一个具名布尔量，就能被模板的 "depends_on"
+// 引用（"flag:<name>"）。后加的功能同样只需注册一个标志，无需再改动依赖
+// 计算本身：解析器通过注册表解析名字，运行时通过同一个注册表求值。
+
+static bool
+cond_flag_mapping_enabled(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return mm_of(im)->enabled;
+}
+
+static bool
+cond_flag_design_mode(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->design_mode;
+}
+
+static bool
+cond_flag_manager_panel(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return ov_of(im)->mode == SC_OVERLAY_MANAGER;
+}
+
+static bool
+cond_flag_switch_popup(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->switch_open;
+}
+
+// 视角模式：MOUSE_MOVE 条目为 hold:"always" 且虚拟手指当前已按下。
+static bool
+cond_flag_look_mode(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    struct sc_mapping_entry *e = find_motion_entry(mm_of(im));
+    if (!e || e->hold != SC_MOTION_HOLD_ALWAYS) {
+        return false;
+    }
+    return im->motion.active;
+}
+
+// 鼠标位移映射正在驱动手指（视角模式或按住鼠标键拖动）。
+static bool
+cond_flag_motion_active(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->motion.active;
+}
+
+// 至少有一个滑动正在运行。
+static bool
+cond_flag_slide_active(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    for (int i = 0; i < SC_MAX_SLIDES; i++) {
+        if (im->slides[i].active) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
+cond_flag_left_click_locked(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->left_click_locked;
+}
+
+static bool
+cond_flag_mouse_any_down(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return motion_any_button_down(im);
+}
+
+static bool
+cond_flag_device_connected(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return !im->disconnected;
+}
+
+static bool
+cond_flag_device_paused(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->screen->paused;
+}
+
+static bool
+cond_flag_camera(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->camera;
+}
+
+static bool
+cond_flag_vfinger(void *ctx) {
+    struct sc_input_manager *im = ctx;
+    return im->vfinger_down;
+}
+
+// Register the built-in feature flags. Must run before the first template is
+// loaded, so that "flag:<name>" references can be validated at load time.
+static void
+register_builtin_cond_flags(struct sc_input_manager *im) {
+    sc_cond_flag_set_ctx(im);
+
+    sc_cond_flag_register("mapping.enabled",
+        "Mapping master switch is on", cond_flag_mapping_enabled);
+    sc_cond_flag_register("mapping.design",
+        "Design mode (F3) is active", cond_flag_design_mode);
+    sc_cond_flag_register("mapping.panel",
+        "Manager panel (F5) is open", cond_flag_manager_panel);
+    sc_cond_flag_register("mapping.switch",
+        "Template switch popup (F2) is open", cond_flag_switch_popup);
+
+    sc_cond_flag_register("look_mode",
+        "View mode: the latched mouse swipe is driving the finger",
+        cond_flag_look_mode);
+    sc_cond_flag_register("motion.active",
+        "A mouse motion mapping is currently driving the finger",
+        cond_flag_motion_active);
+    sc_cond_flag_register("slide.active",
+        "At least one hold-to-slide mapping is running",
+        cond_flag_slide_active);
+
+    sc_cond_flag_register("mouse.left_locked",
+        "Left click lock is engaged", cond_flag_left_click_locked);
+    sc_cond_flag_register("mouse.any_down",
+        "Any mouse button is held down", cond_flag_mouse_any_down);
+
+    sc_cond_flag_register("device.connected",
+        "The device is connected", cond_flag_device_connected);
+    sc_cond_flag_register("device.paused",
+        "The stream is paused", cond_flag_device_paused);
+    sc_cond_flag_register("camera",
+        "Camera mirroring mode", cond_flag_camera);
+    sc_cond_flag_register("vfinger",
+        "The virtual finger (alt-drag) is down", cond_flag_vfinger);
+}
+
 void
 sc_input_manager_init(struct sc_input_manager *im,
                       const struct sc_input_manager_params *params) {
@@ -1495,6 +1773,9 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->switch_open = false;
 
     sc_overlay_init(&im->screen->overlay);
+    // The feature flags must exist before the first template is loaded: the
+    // loader resolves "flag:<name>" references against the registry.
+    register_builtin_cond_flags(im);
     sc_mapping_manager_init(&im->screen->mm);
     // The manager must be able to lift held fingers before it mutates entries.
     sc_mapping_manager_set_release_hook(&im->screen->mm, mapping_release_all, im);
