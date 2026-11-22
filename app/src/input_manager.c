@@ -2657,25 +2657,37 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
     if (mm->enabled && !im->design_mode && control && !paused) {
         // 左键锁定（保留原有语义，优先于普通 MOUSE_LEFT 绑定）
         if (event->button == SDL_BUTTON_LEFT && im->left_click_locked) {
-            if (down == im->left_click_locked_down) return;
-            im->left_click_locked_down = down;
-            enum android_motionevent_action action = down
-                ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
             // Index lookup, never a stored pointer (entries are a fixed table
-            // and are replaced on reload)
+            // and are replaced on reload).
             int idx = mm->mouse_left_locked_idx;
             if (idx >= 0 && mm->entries[idx].key_name) {
+                if (down == im->left_click_locked_down) return;
+                im->left_click_locked_down = down;
+                enum android_motionevent_action action = down
+                    ? AMOTION_EVENT_ACTION_DOWN : AMOTION_EVENT_ACTION_UP;
                 inject_entry(im, &mm->entries[idx], action);
+                return;
             }
-            return;
+            // The lock is still on but its entry was removed (template switch,
+            // hot reload, panel edit). Never swallow every click with nothing
+            // injected: auto-off and give the button back to upstream scrcpy.
+            im->left_click_locked = false;
+            im->left_click_locked_down = false;
+            LOGI("Left click lock auto-off: no MOUSE_LEFT_LOCKED entry");
         }
 
-        // Any button bound in the template (MOUSE_LEFT / MOUSE_MIDDLE /
-        // MOUSE_RIGHT / MOUSE_X1 / MOUSE_X2) is consumed and injected instead
-        // of being forwarded to the device.
+        // A button bound in the template is consumed and injected instead of
+        // being forwarded to the device -- but ONLY if the mapping actually
+        // owns the button. A dependency-gated entry whose conditions are not
+        // satisfied refuses to activate; blindly consuming the event then
+        // drops the click entirely (upstream process_mouse_click() is never
+        // reached), which looks exactly like "all mouse clicks stopped
+        // working after view mode was turned off".
         SDL_Keycode mkc = SC_MAPPING_MOUSE_KEY(event->button);
         struct sc_mapping_entry *m = sc_mapping_manager_find_single(mm, mkc);
+        bool consumed = false;
         if (m) {
+            bool owned = dep_ok(im, m) || m->active || m->down;
             if (m->mode == SC_MAPPING_MODE_TOGGLE) {
                 if (down) {
                     if (m->active) {
@@ -2689,6 +2701,7 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
             } else {
                 entry_deactivate(im, m);
             }
+            consumed = owned;
         }
 
         // A mouse button may also be a dependency source (for single entries
@@ -2696,7 +2709,7 @@ sc_input_manager_process_mouse_button(struct sc_input_manager *im,
         update_combos(im);
         evaluate_dependencies(im);
 
-        if (m) return;
+        if (consumed) return;
     }
 
     enum sc_mouse_button button = sc_mouse_button_from_sdl(event->button);
