@@ -43,8 +43,14 @@
         </div>
       </div>
       <div class="grid-2">
-        <div class="card">
-          <h2>设备</h2>
+      <div class="card">
+        <h2>粘贴命令自动识别</h2>
+        <p class="hint">输入一条完整的 scrcpy 命令，自动解析并填入下面的配置；空着的项一律使用上游内置默认值。</p>
+        <div class="row"><input id="cmdInput" type="text" placeholder="--tcpip=192.168.0.101:5555 --max-fps=60 --no-audio -Sw">
+          <button id="btnParseCmd" class="btn primary">识别</button></div>
+      </div>
+      <div class="card">
+        <h2>设备</h2>
           <label class="field"><span>ADB 序列号（留空自动选择）</span>
             <div class="row"><input id="deviceInput" type="text" placeholder="例如 abc123 或 127.0.0.1:5555">
               <button id="btnRefreshDevices" class="btn ghost">刷新</button></div>

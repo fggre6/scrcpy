@@ -15,6 +15,7 @@ pub fn run() {
             commands::duplicate_template,
             commands::delete_template,
             commands::build_launch_command,
+            commands::parse_launch_command,
             commands::launch_scrcpy,
             commands::stop_scrcpy,
             commands::open_install_dir,

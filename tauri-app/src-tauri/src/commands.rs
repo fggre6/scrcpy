@@ -14,6 +14,61 @@ use serde_json::{json, Value};
 
 use crate::paths;
 
+/// CLI option registry, derived from app/src/cli.c `options[]`.
+/// (short, long, takes_value). Only options relevant to parsing user input
+/// are listed; unknown long options are still preserved verbatim.
+const CLI_OPTIONS: &[(Option<char>, &str, bool)] = &[
+    (Some('b'), "video-bit-rate", true),
+    (Some('d'), "select-usb", false),
+    (Some('e'), "select-tcpip", false),
+    (Some('f'), "fullscreen", false),
+    (Some('h'), "help", false),
+    (Some('K'), "keyboard", false), // shortcut for --keyboard=uhid
+    (Some('m'), "max-size", true),
+    (Some('M'), "mirror", false),
+    (None, "max-fps", true),
+    (Some('n'), "no-control", false),
+    (Some('N'), "no-playback", false),
+    (None, "no-audio", false),
+    (Some('p'), "port", true),
+    (Some('r'), "record", true),
+    (Some('s'), "serial", true),
+    (Some('S'), "turn-screen-off", false),
+    (Some('t'), "show-touches", false),
+    (None, "tcpip", true),
+    (Some('v'), "version", false),
+    (Some('V'), "verbosity", true),
+    (None, "video-codec", true),
+    (Some('w'), "stay-awake", false),
+    (Some('x'), "flex-display", false),
+    (None, "always-on-top", false),
+    (None, "angle", true),
+    (None, "audio-bit-rate", true),
+    (None, "audio-buffer", true),
+    (None, "audio-codec", true),
+    (None, "audio-source", true),
+    (None, "bit-rate", true),
+    (None, "codec", true),
+    (None, "crop", true),
+    (None, "display-id", true),
+    (None, "fps", true),
+    (None, "gamepad", true),
+    (None, "keyboard", true),
+    (None, "mouse", true),
+    (None, "no-video", false),
+    (None, "no-window", false),
+    (None, "rotation", true),
+    (None, "window-size", true),
+    (None, "video-source", true),
+];
+
+fn longopt_takes_value(name: &str) -> Option<bool> {
+    CLI_OPTIONS.iter().find(|(_, l, _)| *l == name).map(|(_, _, v)| *v)
+}
+fn shortopt_info(c: char) -> Option<(&'static str, bool)> {
+    CLI_OPTIONS.iter().find(|(s, _, _)| *s == Some(c)).map(|(_, l, v)| (*l, *v))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchOptions {
@@ -29,23 +84,14 @@ pub struct LaunchOptions {
 
 impl Default for LaunchOptions {
     fn default() -> Self {
-        let mut arguments = BTreeMap::new();
-        arguments.insert("max-size".into(), json!("1280"));
-        arguments.insert("bit-rate".into(), json!("8M"));
-        arguments.insert("fps".into(), json!("60"));
-        arguments.insert("fullscreen".into(), json!(false));
-        arguments.insert("turn-screen-off".into(), json!(true));
-        arguments.insert("no-audio".into(), json!(false));
+        // arguments starts EMPTY on purpose: anything not explicitly set is
+        // left to scrcpy's own built-in defaults (the user's requirement).
         Self {
             schema: 1,
             theme: "hive-light".into(),
             device: String::new(),
-            variables: {
-                let mut v = BTreeMap::new();
-                v.insert("size".into(), "1280x720".into());
-                v
-            },
-            arguments,
+            variables: BTreeMap::new(),
+            arguments: BTreeMap::new(),
             extra_args: String::new(),
             active_template: "default".into(),
         }
@@ -204,23 +250,37 @@ fn expand_variables(input: &str, vars: &BTreeMap<String, String>) -> Result<Stri
     Ok(out)
 }
 
-/// Build the argv passed to scrcpy-core.exe. Deterministic order: arguments
-/// (sorted by key) then extraArgs tokens.
+/// Build the argv passed to scrcpy-core.exe.
+///
+/// Rule: only explicitly configured options are emitted. Empty strings are
+/// skipped entirely (never `--key=`), false booleans are skipped, and any
+/// option left untouched falls back to scrcpy's own built-in default.
+/// `device` and `arguments["serial"]` are the same setting: prefer `device`
+/// and skip the duplicate from arguments.
 fn build_argv(options: &LaunchOptions) -> Result<Vec<String>, String> {
     let mut argv = Vec::new();
+    let mut has_serial = false;
 
     if !options.device.trim().is_empty() {
         let serial = expand_variables(options.device.trim(), &options.variables)?;
         argv.push("--serial".into());
         argv.push(serial);
+        has_serial = true;
     }
 
     for (key, value) in &options.arguments {
+        // device field already supplied --serial; do not emit it twice.
+        if key == "serial" && has_serial {
+            continue;
+        }
         match value {
             Value::Bool(true) => argv.push(format!("--{key}")),
-            Value::Bool(false) => {}
+            Value::Bool(false) => {} // false = leave scrcpy default
             Value::String(s) => {
                 let expanded = expand_variables(s, &options.variables)?;
+                if expanded.trim().is_empty() {
+                    continue; // empty = leave scrcpy default, never "--key="
+                }
                 argv.push(format!("--{key}={expanded}"));
             }
             Value::Number(n) => argv.push(format!("--{key}={n}")),
@@ -237,6 +297,157 @@ fn build_argv(options: &LaunchOptions) -> Result<Vec<String>, String> {
         }
     }
     Ok(argv)
+}
+
+/// Parse a full scrcpy command line into LaunchOptions, so pasting a command
+/// like `--tcpip=192.168.0.101:5555 --max-fps=60 --no-audio -Sw` fills every
+/// form field automatically. Short options are expanded using CLI_OPTIONS;
+/// combined flags such as `-Sw` are split into `-S -w`.
+#[tauri::command]
+pub fn parse_launch_command(command: String) -> Result<LaunchOptions, String> {
+    let mut opts = LaunchOptions::default();
+    // Parsing a command means the user wants exactly what they typed: drop
+    // the form defaults so nothing is silently carried over.
+    opts.arguments.clear();
+    opts.extra_args.clear();
+    opts.device.clear();
+
+    let tokens = shell_split(&command)?;
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+        if tok == "--" {
+            // everything after -- is passed through verbatim
+            opts.extra_args = tokens[i + 1..].join(" ");
+            break;
+        }
+        if let Some(body) = tok.strip_prefix("--") {
+            let (name, inline_val) = match body.split_once('=') {
+                Some((n, v)) => (n, Some(v.to_string())),
+                None => (body, None),
+            };
+            if name.is_empty() {
+                i += 1;
+                continue;
+            }
+            let takes = longopt_takes_value(name);
+            match (takes, inline_val) {
+                (Some(true), Some(v)) => {
+                    // Keep each option under its own name. --tcpip is NOT
+                    // --serial: it selects a TCP/IP device, and scrcpy accepts
+                    // the address as the value of --tcpip itself.
+                    opts.arguments.insert(name.to_string(), Value::String(v));
+                }
+                (Some(true), None) => {
+                    // value-taking option with separate token
+                    if i + 1 < tokens.len() {
+                        let v = tokens[i + 1].clone();
+                        opts.arguments.insert(name.to_string(), Value::String(v));
+                        i += 1;
+                    } else {
+                        return Err(format!("选项 --{name} 缺少值"));
+                    }
+                }
+                (Some(false), _) => {
+                    opts.arguments.insert(name.to_string(), Value::Bool(true));
+                }
+                (None, Some(v)) => {
+                    // Unknown long option: emit verbatim through extra args
+                    push_extra(&mut opts.extra_args, &format!("--{name}={v}"));
+                }
+                (None, None) => {
+                    push_extra(&mut opts.extra_args, &format!("--{name}"));
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if tok.starts_with('-') && tok.len() > 1 {
+            let chars: Vec<char> = tok[1..].chars().collect();
+            for (idx, c) in chars.iter().enumerate() {
+                match shortopt_info(*c) {
+                    Some((long, true)) => {
+                        // value option: rest of token, or next token
+                        let rest: String = chars[idx + 1..].iter().collect();
+                        let val = if !rest.is_empty() {
+                            rest
+                        } else if i + 1 < tokens.len() {
+                            i += 1;
+                            tokens[i].clone()
+                        } else {
+                            return Err(format!("选项 -{c} 缺少值"));
+                        };
+                        if long == "serial" {
+                            opts.device = val;
+                        } else {
+                            opts.arguments.insert(long.to_string(), Value::String(val));
+                        }
+                        break;
+                    }
+                    Some((long, false)) => {
+                        opts.arguments.insert(long.to_string(), Value::Bool(true));
+                    }
+                    None => {
+                        push_extra(&mut opts.extra_args, &format!("-{c}"));
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+        // bare token (serial, file path, etc.)
+        push_extra(&mut opts.extra_args, tok);
+        i += 1;
+    }
+    Ok(opts)
+}
+
+fn push_extra(extra: &mut String, token: &str) {
+    if !extra.is_empty() {
+        extra.push(' ');
+    }
+    extra.push_str(token);
+}
+
+/// Split a command line on whitespace, honoring single/double quotes.
+fn shell_split(s: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => quote = Some(c),
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                }
+                '\\' => {
+                    if let Some(&n) = chars.peek() {
+                        cur.push(n);
+                        chars.next();
+                    }
+                }
+                _ => cur.push(c),
+            },
+        }
+    }
+    if quote.is_some() {
+        return Err("引号未闭合".into());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Ok(out)
 }
 
 #[tauri::command]

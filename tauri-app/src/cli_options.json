@@ -1,0 +1,562 @@
+[
+  {
+    "short": null,
+    "long": "always-on-top",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "angle",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-bit-rate",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-buffer",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-codec",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-codec-options",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-dup",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "audio-encoder",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-source",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "audio-output-buffer",
+    "value": true
+  },
+  {
+    "short": "b",
+    "long": "video-bit-rate",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "background-color",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "camera-ar",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "camera-facing",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "camera-fps",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "camera-high-speed",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "camera-id",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "camera-size",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "camera-torch",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "camera-zoom",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "capture-orientation",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "crop",
+    "value": true
+  },
+  {
+    "short": "d",
+    "long": "select-usb",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "disable-screensaver",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "display-id",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "display-ime-policy",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "display-orientation",
+    "value": true
+  },
+  {
+    "short": "e",
+    "long": "select-tcpip",
+    "value": false
+  },
+  {
+    "short": "f",
+    "long": "fullscreen",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "force-adb-forward",
+    "value": false
+  },
+  {
+    "short": "G",
+    "long": null,
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "gamepad",
+    "value": true
+  },
+  {
+    "short": "h",
+    "long": "help",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "hwdec",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "ignore-video-encoder-constraints",
+    "value": false
+  },
+  {
+    "short": "K",
+    "long": null,
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "keep-active",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "keyboard",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "kill-adb-on-close",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "legacy-paste",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "list-apps",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "list-cameras",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "list-camera-sizes",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "list-displays",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "list-encoders",
+    "value": false
+  },
+  {
+    "short": "m",
+    "long": "max-size",
+    "value": true
+  },
+  {
+    "short": "M",
+    "long": null,
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "max-fps",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "min-size-alignment",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "mouse",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "mouse-bind",
+    "value": true
+  },
+  {
+    "short": "n",
+    "long": "no-control",
+    "value": false
+  },
+  {
+    "short": "N",
+    "long": "no-playback",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "new-display",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "no-audio",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-audio-playback",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-cleanup",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-clipboard-autosync",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-downsize-on-error",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-key-repeat",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-mipmaps",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-mouse-hover",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-power-on",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-terminal-title",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-vd-destroy-content",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-vd-system-decorations",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-video",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-video-playback",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-window",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "no-window-aspect-ratio-lock",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "orientation",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "otg",
+    "value": false
+  },
+  {
+    "short": "p",
+    "long": "port",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "pause-on-exit",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "power-off-on-close",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "prefer-text",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "print-fps",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "push-target",
+    "value": true
+  },
+  {
+    "short": "r",
+    "long": "record",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "raw-key-events",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "record-format",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "record-orientation",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "render-driver",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "render-fit",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "require-audio",
+    "value": false
+  },
+  {
+    "short": "s",
+    "long": "serial",
+    "value": true
+  },
+  {
+    "short": "S",
+    "long": "turn-screen-off",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "screen-off-timeout",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "shortcut-mod",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "start-app",
+    "value": true
+  },
+  {
+    "short": "t",
+    "long": "show-touches",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "tcpip",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "time-limit",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "tunnel-host",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "tunnel-port",
+    "value": true
+  },
+  {
+    "short": "v",
+    "long": "version",
+    "value": false
+  },
+  {
+    "short": "V",
+    "long": "verbosity",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "v4l2-sink",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "v4l2-buffer",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "video-buffer",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "video-codec",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "video-codec-options",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "video-encoder",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "video-source",
+    "value": true
+  },
+  {
+    "short": "w",
+    "long": "stay-awake",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "window-borderless",
+    "value": false
+  },
+  {
+    "short": null,
+    "long": "window-title",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "window-x",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "window-y",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "window-width",
+    "value": true
+  },
+  {
+    "short": null,
+    "long": "window-height",
+    "value": true
+  },
+  {
+    "short": "x",
+    "long": "flex-display",
+    "value": false
+  }
+]

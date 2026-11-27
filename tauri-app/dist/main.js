@@ -20,11 +20,13 @@ let templates = [];
 let currentTemplate = null;
 let varsDraft = [];
 
+// Keys are real scrcpy long option names (from app/src/cli.c), no leading --.
+// Only explicitly filled fields are emitted; blank = scrcpy built-in default.
 const ARG_GROUPS = {
-  '连接': [['serial','文本','设备序列号'],['tcpip','开关','通过 TCP/IP 连接']],
-  '显示': [['window-size','文本','窗口尺寸 宽x高'],['fullscreen','开关','全屏'],['always-on-top','开关','窗口置顶'],['rotation','数字','旋转角度'],['no-window','开关','不显示窗口']],
-  '视频': [['max-size','文本','最大尺寸'],['bit-rate','文本','码率 如 8M'],['fps','数字','帧率'],['video-codec','文本','视频编码'],['crop','文本','裁剪 宽x高+x+y']],
-  '音频': [['no-audio','开关','禁用音频'],['audio-source','文本','音频来源']],
+  '连接': [['serial','文本','设备序列号'],['tcpip','文本','TCP/IP 地址'],['port','文本','端口']],
+  '显示': [['window-width','数字','窗口宽'],['window-height','数字','窗口高'],['fullscreen','开关','全屏'],['always-on-top','开关','窗口置顶'],['orientation','数字','画面旋转 0/90/180/270'],['no-window','开关','不显示窗口']],
+  '视频': [['max-size','文本','最大尺寸'],['video-bit-rate','文本','视频码率 如 8M'],['max-fps','数字','最大帧率'],['video-codec','文本','视频编码'],['crop','文本','裁剪 宽x高+x+y']],
+  '音频': [['no-audio','开关','禁用音频'],['audio-source','文本','音频来源'],['audio-bit-rate','文本','音频码率']],
   '输入': [['keyboard','文本','键盘模式'],['mouse','文本','鼠标模式'],['gamepad','文本','手柄模式'],['no-control','开关','禁止控制']],
   '设备': [['turn-screen-off','开关','关闭设备屏幕'],['stay-awake','开关','保持唤醒'],['show-touches','开关','显示触摸点']]
 };
@@ -107,8 +109,9 @@ function renderSummary(){
   $('configSummary').innerHTML=dl({
     '设备': options.device||'(自动)',
     '分辨率': a['max-size']||'(默认)',
-    '码率': a['bit-rate']||'(默认)',
-    '帧率': a['fps']||'(默认)',
+    '视频码率': a['video-bit-rate']||'(默认)',
+    '最大帧率': a['max-fps']||'(默认)',
+    '视频编码': a['video-codec']||'(默认)',
     '活动模板': options.active_template||'default',
     '映射开关': mappingConfig?.enabled?'开启':'关闭'
   });
@@ -180,6 +183,20 @@ $('btnRefreshDevices').onclick=async()=>{
     $('deviceList').querySelectorAll('.chip').forEach(c=>c.onclick=()=>{$('deviceInput').value=c.dataset.dev;syncArgs();});
   }catch(e){err(e);}
 };
+$('btnParseCmd').onclick=async()=>{
+  const cmd=$('cmdInput').value.trim();
+  if(!cmd){ toast('请先输入一条命令'); return; }
+  try{
+    options = await invoke('parse_launch_command',{command:cmd});
+    $('deviceInput').value = options.device || '';
+    $('extraArgs').value = options.extra_args || '';
+    varsDraft = Object.entries(options.variables||{}).map(([k,v])=>({k,v}));
+    renderVars(); renderArgs(); renderSummary();
+    await refreshPreview();
+    toast('已识别：'+Object.keys(options.arguments||{}).length+' 个配置项');
+  }catch(e){ err(e); }
+};
+
 $('btnLaunch').onclick=async()=>{
   try{ await saveOptions(); const r=await invoke('launch_scrcpy',{options}); toast('已启动: '+r); }
   catch(e){err(e);}
