@@ -91,7 +91,7 @@ jobs:
       - name: 编译
         run: ninja -C build
 
-      - name: 打包
+      - name: 收集运行时文件
         run: |
           mkdir -p dist/scrcpy-win64
           cp build/app/scrcpy.exe dist/scrcpy-win64/scrcpy.exe
@@ -105,13 +105,24 @@ jobs:
           if [ -f scrcpy_mapping_config.json ]; then
             cp scrcpy_mapping_config.json dist/scrcpy-win64/
           fi
+          # 打包成 payload.zip，供启动器内嵌
+          cd dist/scrcpy-win64
+          zip -rq ../payload.zip .
+          cd ..
+          ls -lh payload.zip
+
+      - name: 编译单文件启动器
+        run: |
           cd dist
-          zip -r scrcpy-win64.zip scrcpy-win64
+          # 把 payload.zip 作为二进制数据段嵌入启动器
+          objcopy -I binary -O pe-x86-64 -B i386:x86-64 payload.zip payload.o
+          gcc -O2 -s -o scrcpy-portable.exe ../windows/portable_launcher.c payload.o
+          ls -lh scrcpy-portable.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-package
-          path: dist/scrcpy-win64.zip
+          path: dist/scrcpy-portable.exe
 
   # ==================== 创建 Release ====================
   release:
@@ -161,11 +172,11 @@ jobs:
             - `F5`：打开/关闭内置管理面板
 
             ### 使用
-            1. 解压后运行 `scrcpy.exe` 投屏。
-            2. 按 `F5` 打开内置管理面板编辑模板。
-            3. 模板文件位于 `templates/` 目录，活动模板记录在 `scrcpy_mapping_config.json`。
+            1. 下载并双击 `scrcpy-portable.exe` 即可投屏，无需解压、无需担心 DLL 散落或缺失。
+            2. 首次运行会自动把运行文件释放到 `%LOCALAPPDATA%\scrcpy-portable\<版本哈希>\`，之后直接双击同一个 exe 即可。
+            3. 按 `F5` 打开内置管理面板编辑模板；模板和配置保存在释放出的运行目录中，同一版本内修改会保留。
 
             编译时间：${{ github.event.repository.updated_at }}
           draft: false
           prerelease: false
-          files: artifacts/scrcpy-win64.zip
+          files: artifacts/scrcpy-portable.exe
