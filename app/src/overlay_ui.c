@@ -226,9 +226,13 @@ render_manager(struct sc_overlay *ov, SDL_Renderer *renderer,
                 90, 140, 220, 255);
 
     char line[220];
-    snprintf(line, sizeof(line), "MANAGER  [%s]  mapping:%s   (F5 close)",
+    // kb = 键盘状态：on 正常转发 / map 只映射不转发 / mute 映射与转发都停
+    const char *kb = !mm->stop_keyboard_forwarding ? "on"
+                   : mm->stop_keyboard_forwarding_allow_template_mapping
+                        ? "map" : "mute";
+    snprintf(line, sizeof(line), "MANAGER  [%s]  mapping:%s  kb:%s  (F5)",
              mm->active_name ? mm->active_name : "-",
-             mm->enabled ? "ON" : "OFF");
+             mm->enabled ? "ON" : "OFF", kb);
     draw_text(renderer, 10, 8, line, 120, 200, 255);
     snprintf(line, sizeof(line), "loaded: %d ok, %d rejected",
              mm->last_load.ok, mm->last_load.fail);
@@ -517,9 +521,21 @@ sc_overlay_render(struct sc_overlay *ov, SDL_Renderer *renderer,
             float iy = (win_h - ih) / 2.0f;
             Uint8 r = ov->mapping_enabled ? 40 : 180;
             Uint8 g = ov->mapping_enabled ? 160 : 40;
-            draw_panel(renderer, ix, iy, iw, ih, r, g, 60, 220);
             const char *txt = ov->mapping_enabled ? "Mapping: ON"
                                                   : "Mapping: OFF";
+            // 键盘转发被配置停用时给出明确提示，否则用户会以为键盘坏了。
+            if (ov->mapping_enabled && ov->mm && ov->mm->stop_keyboard_forwarding) {
+                txt = ov->mm->stop_keyboard_forwarding_allow_template_mapping
+                    ? "Mapping: ON (keys not forwarded)"
+                    : "Mapping: ON (keyboard muted)";
+            }
+            // SDL_RenderDebugText 是 8px 等宽字体，文字变长时加宽提示条。
+            float tw = (float) strlen(txt) * 8.0f + 24.0f;
+            if (tw > iw) {
+                iw = tw;
+                ix = (win_w - iw) / 2.0f;
+            }
+            draw_panel(renderer, ix, iy, iw, ih, r, g, 60, 220);
             draw_text(renderer, ix + 12, iy + 12, txt, 255, 255, 255);
         }
     }

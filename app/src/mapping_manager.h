@@ -124,6 +124,22 @@ struct sc_mapping_manager {
     char *active_name; // current active template name (without .json)
     bool dirty;        // entries changed since the last successful save
 
+    // Keyboard forwarding gate, independent of the `enabled` master switch.
+    // Forwarding is the "type on the device" path (key events + SDL text input
+    // events); mapping itself is unaffected, and so is the mouse.
+    //   stop_keyboard_forwarding = true
+    //     Keyboard input is no longer sent to the device: no typing, no device
+    //     side special keys. Keys consumed by the mapping still inject their
+    //     touches (that is mapping, not forwarding), every other key is simply
+    //     dropped. scrcpy's own shortcuts (F2-F5, Alt+Z, F11, ...) keep working.
+    //   stop_keyboard_forwarding_allow_template_mapping = true
+    //     Only meaningful while the gate above is on: keys that the active
+    //     template really maps (single-key entries, combo members) keep their
+    //     mapping; when false the mapping is dropped too, so the keyboard is
+    //     completely silent (no forwarding and no mapping).
+    bool stop_keyboard_forwarding;
+    bool stop_keyboard_forwarding_allow_template_mapping;
+
     // Shortcuts (SDL keycodes)
     SDL_Keycode sc_switch;  // quick template switch (F2)
     SDL_Keycode sc_design;  // design mode (F3)

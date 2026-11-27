@@ -99,9 +99,14 @@
     "manager_panel": "F5"
   },
   "active_template": "default",
-  "enabled": false
+  "enabled": false,
+  "stop_keyboard_forwarding": false,
+  "stop_keyboard_forwarding_allow_template_mapping": false
 }
 ```
+
+- `stop_keyboard_forwarding`：为 `true` 时**键盘不再转发给设备**——不会在手机上打字，也不会触发设备侧按键（按键事件与文本输入两条路径都被拦住）。映射本身不受影响，鼠标也不受影响，scrcpy 自己的快捷键（`F2`–`F5`、`Alt+Z`、`Alt+C/V`、`F11` 等）仍可用。
+- `stop_keyboard_forwarding_allow_template_mapping`：仅在上一个开关为 `true` 时生效；为 `true` 时**模板里确有映射规则的按键仍然照常映射**（单键条目与组合键成员），只是不再转发；为 `false` 时连映射一起停掉，键盘完全静默。
 
 ## 快速开始
 

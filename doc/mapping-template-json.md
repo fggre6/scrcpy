@@ -583,7 +583,7 @@ toggle 用于非单键 touch、依赖条件引用自身触发键、灵敏度仅 
 `S` 保存。
 面板编辑只改内存，按 `S`（或关闭面板时若脏）才写回文件。
 
-## 14. 配置文件的快捷键字段（不属于模板，但同目录同机制）
+## 14. 配置文件的快捷键与总开关字段（不属于模板，但同目录同机制）
 
 `scrcpy_mapping_config.json`：
 
@@ -596,7 +596,9 @@ toggle 用于非单键 touch、依赖条件引用自身触发键、灵敏度仅 
     "manager_panel": "F5"
   },
   "active_template": "default",
-  "enabled": false
+  "enabled": false,
+  "stop_keyboard_forwarding": false,
+  "stop_keyboard_forwarding_allow_template_mapping": false
 }
 ```
 
@@ -605,3 +607,23 @@ toggle 用于非单键 touch、依赖条件引用自身触发键、灵敏度仅 
 - `active_template` 缺省 `default`。
 - `enabled` 缺省 `false`；默认模板 `templates/default.json` 为空映射
   （`{"name":"default","mappings":[]}`），因此初次运行不拦截任何按键或鼠标。
+- `stop_keyboard_forwarding` 缺省 `false`。为 `true` 时**停止把键盘转发给设备**，
+  共两条路径一起拦住：
+  1. 按键事件——`sc_input_manager_process_key()` 末尾（映射拦截与 scrcpy 自身
+     快捷键之后、真正调用 `process_key` 之前）直接 `return`，因此既不转发普通
+     按键、也不触发设备侧特殊键，剪贴板自动同步的 Ctrl+V 也不再发送；
+  2. 文本输入——`sc_input_manager_process_text_input()` 直接 `return`。手机上的
+     “打字”走的是 `SDL_EVENT_TEXT_INPUT`，只堵按键事件是不够的。
+  映射注入不是转发，因此**映射本身完全不受影响**；鼠标按键与位移映射同样不受
+  影响。scrcpy 自己的快捷键（`F2`–`F5`、`Alt+C/V`、`Alt+Z`、`F11` 等）在更前面
+  处理，仍然可用——`Alt+V` 依旧会把 PC 剪贴板推到设备，这属于显式快捷键，不是
+  键盘转发。
+- `stop_keyboard_forwarding_allow_template_mapping` 缺省 `false`，仅在上一项为
+  `true` 时生效。为 `true` 时**模板里确有映射规则的按键仍然照常映射**（`mappings[]`
+  中的单键与组合键成员），只是不再转发；其余按键被静默丢弃。为 `false` 时连映射
+  一起停掉（`process_key` 里整段拦截被跳过），键盘完全静默。
+  纯依赖源键（只被 `depends_on` 引用、自己不是映射键）在允许模板映射时继续只
+  跟踪状态、不消费按键，所以在该模式下 `depends_on` 仍然有效。
+- 从“可映射”变成“完全静默”的热重载会触发一次 release-all，避免设备上残留按下
+  的手指/虚拟键状态；只是“停止转发”的变化不需要（不涉及注入）。
+- 保存配置（F4 切换总开关、切模板）时这两项会按内存值一并写回。

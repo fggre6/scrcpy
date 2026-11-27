@@ -1443,6 +1443,40 @@ load_config(struct sc_mapping_manager *mm) {
         mm->enabled = cJSON_IsTrue(en);
     }
 
+    // 键盘转发开关。缺省（或类型不对）时保持当前值：热重载只在文件里真的写了
+    // 这个键时才改状态，避免旧配置文件把当前运行状态顶掉。
+    bool was_stop = mm->stop_keyboard_forwarding;
+    bool was_map = !was_stop
+                || mm->stop_keyboard_forwarding_allow_template_mapping;
+    cJSON *kb_off = cJSON_GetObjectItemCaseSensitive(root,
+                                                  "stop_keyboard_forwarding");
+    if (cJSON_IsBool(kb_off)) {
+        mm->stop_keyboard_forwarding = cJSON_IsTrue(kb_off);
+    }
+    cJSON *kb_allow = cJSON_GetObjectItemCaseSensitive(root,
+                       "stop_keyboard_forwarding_allow_template_mapping");
+    if (cJSON_IsBool(kb_allow)) {
+        mm->stop_keyboard_forwarding_allow_template_mapping =
+            cJSON_IsTrue(kb_allow);
+    }
+    bool now_map = !mm->stop_keyboard_forwarding
+                || mm->stop_keyboard_forwarding_allow_template_mapping;
+
+    if (was_map && !now_map) {
+        // 映射也一起停掉：还没松开的按键必须抬起，否则设备上会残留按下状态。
+        LOGI("Keyboard mapping DISABLED by config (keyboard silent)");
+        if (mm->release_hook) {
+            mm->release_hook(mm->release_opaque);
+        }
+    } else if (!was_map && now_map) {
+        LOGI("Keyboard mapping re-enabled by config%s",
+             mm->stop_keyboard_forwarding
+                 ? " (template-mapped keys only)" : "");
+    } else if (was_stop != mm->stop_keyboard_forwarding) {
+        LOGI("Keyboard forwarding %s by config (mapping and mouse unaffected)",
+             mm->stop_keyboard_forwarding ? "STOPPED" : "RESUMED");
+    }
+
     cJSON_Delete(root);
     mm->config_stamp = file_stamp(mm->config_path);
 }
@@ -1464,6 +1498,11 @@ save_config(struct sc_mapping_manager *mm) {
         cJSON_AddStringToObject(root, "active_template", mm->active_name);
     }
     cJSON_AddBoolToObject(root, "enabled", mm->enabled);
+    cJSON_AddBoolToObject(root, "stop_keyboard_forwarding",
+                          mm->stop_keyboard_forwarding);
+    cJSON_AddBoolToObject(root,
+                          "stop_keyboard_forwarding_allow_template_mapping",
+                          mm->stop_keyboard_forwarding_allow_template_mapping);
 
     char *text = cJSON_Print(root);
     cJSON_Delete(root);
@@ -2043,6 +2082,9 @@ sc_mapping_manager_init(struct sc_mapping_manager *mm) {
     // Defaults: mapping disabled until a template/config says otherwise, and
     // nothing is hijacked (no W, no right click) without an explicit entry.
     mm->enabled = false;
+    // Keyboard forwarding on by default: the keyboard behaves as it always did.
+    mm->stop_keyboard_forwarding = false;
+    mm->stop_keyboard_forwarding_allow_template_mapping = false;
     mm->sc_switch = SDLK_F2;
     mm->sc_design = SDLK_F3;
     mm->sc_toggle = SDLK_F4;

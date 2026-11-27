@@ -2084,6 +2084,11 @@ sc_input_manager_process_text_input(struct sc_input_manager *im,
     if (im->camera || !im->kp || im->screen->paused || im->disconnected) {
         return;
     }
+    // 键盘转发开关：打字走的是文本输入事件（不是按键事件），必须在这里也拦住，
+    // 否则“停止转发”之后仍然能往设备里输入文字。
+    if (mm_of(im)->stop_keyboard_forwarding) {
+        return;
+    }
     if (!im->kp->ops->process_text) return;
     if (overlay_manager_open(im)) return; // panel is modal: no text forwarding
 
@@ -2214,9 +2219,18 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     }
 
     // ---- 自定义映射拦截（仅当启用且非设计模式） ----
-    if (mm->enabled && !im->design_mode && control && !paused
-            && !disconnected && !im->camera) {
-        // 左 Alt 切换左键锁定
+    // 键盘转发开关（配置项 stop_keyboard_forwarding）：为 true 时键盘不再转发给
+    // 设备（不会在手机上打字），映射本身不受影响；鼠标也不受影响。
+    // 若子配置 stop_keyboard_forwarding_allow_template_mapping 为 false，则连映射
+    // 也一起停掉（键盘完全静默）：这里直接跳过整段拦截，按键在后面被丢弃。
+    bool kb_map = mm->enabled && !im->design_mode && control && !paused
+               && !disconnected && !im->camera;
+    if (kb_map && mm->stop_keyboard_forwarding
+            && !mm->stop_keyboard_forwarding_allow_template_mapping) {
+        kb_map = false;
+    }
+    if (kb_map) {
+        // 左 Alt 切换左键锁定（映射行为；此时 Alt 不会转发到设备）
         if (sdl_keycode == SDLK_LALT && down && !repeat && !ctrl && !shift) {
             im->left_click_locked = !im->left_click_locked;
             im->left_click_locked_down = false;
@@ -2233,7 +2247,9 @@ sc_input_manager_process_key(struct sc_input_manager *im,
             sc_mapping_manager_key_is_dependency(mm, sdl_keycode);
 
         if (is_mapping_key || is_combo_key || is_dep_key) {
-            if (down && repeat) return;  // 忽略键盘自动重复
+            // 忽略键盘自动重复：只对真正被映射消费的按键生效，纯依赖键
+            // 的重复事件继续转发给设备（否则按住依赖键无法连续输入）。
+            if (down && repeat && (is_mapping_key || is_combo_key)) return;
 
             im->g_pressed[sdl_keycode & 0xFF] = down;
 
@@ -2446,6 +2462,15 @@ sc_input_manager_process_key(struct sc_input_manager *im,
 
     if (!im->kp || paused) return;
     assert(!im->camera);
+
+    // ---- 键盘转发开关：停止把按键送到设备 ----
+    // 映射已经在上面处理完（被消费的键早已 return），走到这里的就是“要转发”的
+    // 按键。配置 stop_keyboard_forwarding=true 时直接丢弃：不打字、不触发设备侧
+    // 按键，剪贴板自动同步的 Ctrl+V 也不再发送。scrcpy 自身的快捷键
+    // （F2-F5 / Alt+Z / Alt+C/V / F11 ...）在上面已各自处理，仍然可用。
+    if (mm->stop_keyboard_forwarding) {
+        return;
+    }
 
     uint64_t ack_to_wait = SC_SEQUENCE_INVALID;
     bool is_ctrl_v = ctrl && !shift && sdl_keycode == SDLK_V && down && !repeat;

@@ -6,5 +6,7 @@
     "manager_panel": "F5"
   },
   "active_template": "default",
-  "enabled": false
+  "enabled": false,
+  "stop_keyboard_forwarding": false,
+  "stop_keyboard_forwarding_allow_template_mapping": false
 }
