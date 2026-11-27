@@ -1,0 +1,1477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>按键映射可视化编辑器 · scrcpy 映射模板</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #141a23;
+    --panel2: #1a2230;
+    --card: #1e2734;
+    --card-hover: #263241;
+    --line: #2a3444;
+    --text: #e7eef8;
+    --muted: #8b98ab;
+    --accent: #4f8cff;
+    --accent-soft: rgba(79, 140, 255, .16);
+    --ok: #2ecc71;
+    --warn: #f5a524;
+    --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    overflow: hidden;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  #app { display: grid; grid-template-columns: 236px minmax(0, 1fr) 312px; height: 100vh; }
+
+  /* ---------- 侧栏 ---------- */
+  .side { background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
+  #palette { border-right: 1px solid var(--line); }
+  #inspector { border-left: 1px solid var(--line); }
+  .side-head {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 14px 14px 10px; border-bottom: 1px solid var(--line);
+  }
+  .side-head h1 { font-size: 13px; margin: 0; letter-spacing: .04em; }
+  .side-head .hint { font-size: 11px; color: var(--muted); margin-left: auto; }
+
+  .palette { padding: 10px; display: grid; gap: 8px; overflow: auto; }
+  .pcard {
+    display: grid; grid-template-columns: 34px 1fr; gap: 10px; align-items: center;
+    padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--card); cursor: grab; user-select: none;
+    transition: border-color .12s, background .12s, transform .12s;
+  }
+  .pcard:hover { background: var(--card-hover); border-color: #3a4a63; transform: translateY(-1px); }
+  .pcard:active { cursor: grabbing; }
+  .pcard .ico {
+    width: 34px; height: 34px; border-radius: 9px; background: var(--accent-soft);
+    display: grid; place-items: center; color: #9dc0ff;
+  }
+  .pcard .ico svg { width: 18px; height: 18px; }
+  .pcard .nm { font-weight: 600; font-size: 12.5px; }
+  .pcard .ds { font-size: 11px; color: var(--muted); line-height: 1.35; }
+
+  .side-foot { padding: 10px 14px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+
+  /* ---------- 中间 ---------- */
+  #stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #0a0e14; }
+  .toolbar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .tb-group { display: flex; align-items: center; gap: 6px; }
+  .tb-group.right { margin-left: auto; }
+  .tb-label { font-size: 11px; color: var(--muted); }
+  .tb-input {
+    width: 132px; background: var(--panel2); border: 1px solid var(--line);
+    border-radius: 7px; padding: 5px 8px; outline: none;
+  }
+  .tb-input:focus { border-color: var(--accent); }
+  button {
+    background: var(--panel2); border: 1px solid var(--line); border-radius: 7px;
+    padding: 5px 10px; cursor: pointer; transition: border-color .12s, background .12s;
+  }
+  button:hover { border-color: #3a4a63; background: #202a38; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #05101f; font-weight: 600; }
+  button.primary:hover { background: #6ba0ff; }
+  button.ghost { background: transparent; }
+  select { background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 6px; }
+
+  .viewport { flex: 1; display: grid; place-items: center; padding: 22px; overflow: auto; }
+  .screen {
+    position: relative; border-radius: 14px; overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #16202e 0%, #0b1017 70%),
+      #0b1017;
+    border: 1px solid #33415a;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .03);
+    touch-action: none;
+  }
+  .bgimg, .grid, .links, .overlays { position: absolute; inset: 0; }
+  .bgimg { background-size: 100% 100%; background-position: center; opacity: .92; }
+  .grid {
+    background-image:
+      linear-gradient(to right, rgba(120, 160, 220, .10) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(120, 160, 220, .10) 1px, transparent 1px);
+    background-size: 10% 10%;
+    pointer-events: none;
+  }
+  .grid.off { display: none; }
+  .links { pointer-events: none; }
+  .overlays { pointer-events: none; }
+  .empty {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: #4d5c72; font-size: 13px; pointer-events: none; letter-spacing: .06em;
+  }
+
+  /* ---------- 组件（映射） ---------- */
+  .w {
+    position: absolute; transform: translate(-50%, -50%);
+    min-width: calc(46px * var(--z)); height: calc(46px * var(--z));
+    padding: 0 calc(8px * var(--z));
+    border-radius: calc(12px * var(--z));
+    display: grid; place-items: center;
+    background: rgba(79, 140, 255, .20);
+    border: calc(1.5px * var(--z)) solid rgba(120, 172, 255, .9);
+    color: #dbe9ff; font-weight: 700;
+    font-size: calc(12.5px * var(--z)); letter-spacing: .02em;
+    cursor: grab; user-select: none; pointer-events: auto;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .35);
+    white-space: nowrap; backdrop-filter: blur(2px);
+  }
+  .w:active { cursor: grabbing; }
+  .w.sel { border-color: #6ff0c2; background: rgba(46, 204, 113, .22); color: #d6ffee; }
+  .w.motion { border-radius: 999px; background: rgba(180, 120, 255, .18); border-color: rgba(196, 150, 255, .9); color: #e8d8ff; }
+  .w.virtual { border-style: dashed; background: rgba(245, 165, 36, .16); border-color: rgba(245, 165, 36, .85); color: #ffe6b8; }
+  .w.lock { background: rgba(255, 107, 107, .16); border-color: rgba(255, 107, 107, .8); color: #ffd9d9; }
+  .w.mouse { background: rgba(64, 214, 208, .16); border-color: rgba(90, 224, 218, .85); color: #d3fffd; }
+  .w .tag {
+    position: absolute; top: calc(-9px * var(--z)); right: calc(-8px * var(--z));
+    font-size: calc(9px * var(--z)); font-weight: 600; letter-spacing: .04em;
+    color: #cfe0ff; background: #24344d; border: 1px solid #3a4f70;
+    padding: 0 calc(5px * var(--z)); border-radius: 999px; line-height: 1.6;
+  }
+  .dot {
+    position: absolute; width: calc(14px * var(--z)); height: calc(14px * var(--z));
+    border-radius: 50%; background: #0d1117; border: calc(2px * var(--z)) solid #6ff0c2;
+    transform: translate(-50%, -50%); cursor: move; pointer-events: auto;
+    box-shadow: 0 0 0 calc(3px * var(--z)) rgba(46, 204, 113, .18);
+  }
+  .dot.sub { border-color: #4f8cff; box-shadow: 0 0 0 calc(3px * var(--z)) rgba(79, 140, 255, .16); }
+  .dot.end { border-color: #f5a524; box-shadow: 0 0 0 calc(3px * var(--z)) rgba(245, 165, 36, .18); }
+  .dot .cdot { position: absolute; inset: 0; border-radius: 50%; }
+
+  .ghost {
+    position: fixed; z-index: 99; pointer-events: none; transform: translate(-50%, -50%);
+    padding: 7px 12px; border-radius: 9px; background: var(--accent); color: #05101f;
+    font-weight: 700; font-size: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); opacity: .9;
+  }
+
+  /* ---------- 属性面板 ---------- */
+  #insp { padding: 12px; overflow: auto; flex: 1; min-height: 0; }
+  .empty-hint { color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .fgroup { margin-bottom: 14px; }
+  .fgroup > label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 5px; letter-spacing: .04em; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row > * { min-width: 0; }
+  .input {
+    flex: 1; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 8px; outline: none; width: 100%;
+  }
+  .input:focus { border-color: var(--accent); }
+  .input.mono { font-family: ui-monospace, Consolas, monospace; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .chip {
+    padding: 2px 7px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--panel2); font-size: 11px; cursor: pointer; color: #c6d4e6;
+  }
+  .chip:hover { border-color: var(--accent); color: #fff; }
+  .hintx { font-size: 11px; color: var(--muted); margin-top: 5px; line-height: 1.5; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .num { display: flex; align-items: center; gap: 6px; }
+  .num .input { text-align: right; }
+  .dep { display: grid; grid-template-columns: 1fr 84px 24px; gap: 5px; margin-bottom: 5px; }
+  .dep button { padding: 0 6px; line-height: 1; }
+  .btn-row { display: flex; gap: 6px; margin-top: 4px; }
+  .btn-row button { flex: 1; }
+  .danger { color: #ffb3b3; border-color: #5b2f34; background: #2a1a1e; }
+  .danger:hover { background: #341f24; border-color: #7a3d44; }
+  .kv { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .kv b { color: #c9d7ea; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .jsonbox { border-top: 1px solid var(--line); }
+  .jsonbox summary {
+    cursor: pointer; padding: 9px 12px; font-size: 11.5px; color: var(--muted);
+    list-style: none; display: flex; align-items: center; gap: 6px;
+  }
+  .jsonbox summary::-webkit-details-marker { display: none; }
+  .jsonbox summary::before { content: "▸"; font-size: 10px; }
+  .jsonbox[open] summary::before { content: "▾"; }
+  .jsonbox pre {
+    margin: 0; padding: 0 12px 12px; max-height: 42vh; overflow: auto;
+    font: 11px/1.5 ui-monospace, Consolas, monospace; color: #a9c4e6;
+    white-space: pre; tab-size: 2;
+  }
+
+  .statusbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 7px 14px; border-top: 1px solid var(--line); background: var(--panel);
+    font-size: 11.5px; color: var(--muted); min-height: 34px;
+  }
+  .statusbar .ok { color: var(--ok); }
+  .statusbar .warn { color: var(--warn); }
+  .statusbar .err { color: var(--err); }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(10px);
+    background: #1d2634; border: 1px solid #33415a; color: #e7eef8;
+    padding: 8px 14px; border-radius: 9px; font-size: 12px; opacity: 0;
+    transition: opacity .18s, transform .18s; pointer-events: none; z-index: 100;
+    box-shadow: 0 12px 34px rgba(0, 0, 0, .5);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside class="side" id="palette">
+    <div class="side-head"><h1>组件库</h1><span class="hint">拖到画面</span></div>
+    <div class="palette" id="paletteList"></div>
+    <div class="side-foot">拖动组件到右侧画面即完成映射；组件名就是它绑定的按键。</div>
+  </aside>
+
+  <main id="stage">
+    <div class="toolbar">
+      <div class="tb-group">
+        <span class="tb-label">模板名</span>
+        <input id="tplName" class="tb-input" value="my-template" spellcheck="false">
+      </div>
+      <div class="tb-group">
+        <button id="btnImport" title="读取已有的模板 JSON">导入</button>
+        <button id="btnExport" class="primary" title="导出为 templates/&lt;模板名&gt;.json">导出 JSON</button>
+        <button id="btnCopy">复制</button>
+      </div>
+      <div class="tb-group right">
+        <span class="tb-label">画面</span>
+        <select id="aspectSel" title="画面方向">
+          <option value="landscape">横屏 16:9</option>
+          <option value="portrait">竖屏 9:19.5</option>
+        </select>
+        <select id="zoomSel" title="缩放">
+          <option value="fit">适应窗口</option>
+          <option value="0.75">75%</option>
+          <option value="1">100%</option>
+          <option value="1.25">125%</option>
+        </select>
+        <button id="btnBg">背景图</button>
+        <button id="btnClear" class="danger">清空</button>
+      </div>
+      <input type="file" id="fileJson" accept=".json,application/json" hidden>
+      <input type="file" id="fileImg" accept="image/*" hidden>
+    </div>
+
+    <div class="viewport" id="viewport">
+      <div class="screen" id="screen" style="--z:1;width:800px;height:450px">
+        <div class="bgimg" id="bgimg"></div>
+        <div class="grid" id="grid"></div>
+        <svg class="links" id="links" viewBox="0 0 800 450" preserveAspectRatio="none"></svg>
+        <div class="overlays" id="overlays"></div>
+        <div class="empty" id="empty">把左侧组件拖到这里</div>
+      </div>
+    </div>
+
+    <div class="statusbar" id="status"></div>
+  </main>
+
+  <aside class="side" id="inspector">
+    <div class="side-head"><h1>属性</h1><span class="hint" id="selHint">未选中</span></div>
+    <div id="insp"></div>
+    <details class="jsonbox">
+      <summary>JSON 预览（自动生成）</summary>
+      <pre id="jsonOut"></pre>
+    </details>
+  </aside>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+// ============================================================
+// 组件预设：与 mapping_manager 支持的映射一一对应
+// ============================================================
+const ICONS = {
+  tap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>',
+  slide: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 19L19 5"/><path d="M13 5h6v6"/><circle cx="5" cy="19" r="1.8"/></svg>',
+  multi: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="7" cy="9" r="2.2"/><circle cx="17" cy="9" r="2.2"/><circle cx="12" cy="17" r="2.2"/></svg>',
+  toggle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="7" width="20" height="10" rx="5"/><circle cx="16" cy="12" r="3"/></svg>',
+  motion: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2-4 3 8 3-8 2 4h4"/></svg>',
+  virtual: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M8 10h8M8 14h4" stroke-dasharray="2 2"/></svg>',
+  combo: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="2" y="8" width="9" height="8" rx="2"/><rect x="13" y="8" width="9" height="8" rx="2"/><path d="M11 12h2"/></svg>',
+  mouse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="7" y="2.5" width="10" height="19" rx="5"/><path d="M12 6v5"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="10" width="16" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 018 0v3"/></svg>',
+  dep: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h7l3 5-3 5H4"/><circle cx="18" cy="12" r="2.4"/></svg>'
+};
+
+const PRESETS = [
+  {
+    id: 'tap', name: '单点映射', icon: 'tap', tag: '点击', auto: 'letter',
+    desc: '按一下 = 点一下屏幕',
+    def: {}
+  },
+  {
+    id: 'slide', name: '滑动映射', icon: 'slide', tag: '滑动', auto: 'arrow',
+    desc: '按住从起点滑到终点（开镜/上滑）',
+    def: { dx: 0, dy: -0.3, duration: 250 }
+  },
+  {
+    id: 'multi', name: '多点同按', icon: 'multi', tag: '多指', auto: 'letter',
+    desc: '一个键同时按住 2~5 个位置',
+    def: { positions: [[0.56, 0.66]] }
+  },
+  {
+    id: 'toggle', name: '开关映射', icon: 'toggle', tag: '开关', auto: 'letter',
+    desc: '按一次开、再按一次关（持续开火）',
+    def: { mode: 'toggle' }
+  },
+  {
+    id: 'motion', name: '视角拖动', icon: 'motion', tag: '鼠标', key: 'MOUSE_MOVE',
+    desc: '按住鼠标键移动 = 拖视角',
+    def: { sensitivity: 1, hold: 'button' }
+  },
+  {
+    id: 'motionAlways', name: '视角常驻', icon: 'motion', tag: '鼠标', key: 'MOUSE_MOVE',
+    desc: '不用按鼠标，一动就转视角',
+    def: { sensitivity: 1, hold: 'always' }
+  },
+  {
+    id: 'virtual', name: '虚拟键', icon: 'virtual', tag: '状态', auto: 'letter',
+    desc: '不点屏幕，只记状态供依赖/组合使用',
+    def: {}
+  },
+  {
+    id: 'combo', name: '组合键', icon: 'combo', tag: '组合', auto: 'combo',
+    desc: '几个键同时按住才触发（W+A）',
+    def: {}
+  },
+  {
+    id: 'mouse', name: '鼠标按键', icon: 'mouse', tag: '鼠标', auto: 'mouse',
+    desc: '鼠标左/右/侧键 → 点屏幕',
+    def: { mouseBtn: 'MOUSE_LEFT' }
+  },
+  {
+    id: 'lock', name: '左键锁定', icon: 'lock', tag: '鼠标', key: 'MOUSE_LEFT_LOCKED',
+    desc: '左 Alt 切换：左键按住屏幕某点',
+    def: {}
+  },
+  {
+    id: 'dep', name: '条件映射', icon: 'dep', tag: '条件', auto: 'letter',
+    desc: '满足依赖条件时才生效（按住 Shift…）',
+    def: { deps: [{ ref: 'lshift', state: 'pressed' }] }
+  }
+];
+const PRESET_BY_ID = Object.fromEntries(PRESETS.map(p => [p.id, p]));
+
+// ============================================================
+// 状态
+// ============================================================
+const ASPECTS = {
+  landscape: { w: 800, h: 450 },
+  portrait: { w: 390, h: 844 }
+};
+
+const state = {
+  template: 'my-template',
+  aspect: 'landscape',
+  zoomMode: 'fit',
+  zoom: 1,
+  bg: '',
+  grid: true,
+  widgets: [],
+  sel: null
+};
+
+let uidSeq = 1;
+const els = new Map();     // widget id -> { root }
+let undoStack = [];
+let redoStack = [];
+
+const $ = id => document.getElementById(id);
+const screenEl = $('screen');
+const overlaysEl = $('overlays');
+const linksEl = $('links');
+const inspEl = $('insp');
+const statusEl = $('status');
+const emptyEl = $('empty');
+const jsonOut = $('jsonOut');
+
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const round4 = v => Math.round(v * 1e4) / 1e4;
+const dims = () => ASPECTS[state.aspect];
+
+// ============================================================
+// 键名工具
+// ============================================================
+const LETTERS = ['w','a','s','d','q','e','r','f','g','h','j','k','l','u','i','o','p','z','x','c','v','b','n','m','t','y'];
+const ARROWS = ['Up','Left','Down','Right'];
+const MOUSE_ORDER = ['MOUSE_LEFT', 'MOUSE_RIGHT', 'MOUSE_MIDDLE', 'MOUSE_X1', 'MOUSE_X2'];
+
+function keyUsed(key, skipId) {
+  const k = String(key || '').trim().toLowerCase();
+  return state.widgets.some(w => w.id !== skipId && w.key.toLowerCase() === k);
+}
+
+function nextFreeKey(kind) {
+  if (kind === 'arrow') {
+    return ARROWS.find(k => !keyUsed(k)) || 'Up';
+  }
+  if (kind === 'mouse') {
+    return MOUSE_ORDER.find(k => !keyUsed(k)) || 'MOUSE_X2';
+  }
+  if (kind === 'combo') {
+    for (const a of LETTERS) {
+      const cand = 'lshift+' + a;
+      if (!keyUsed(cand)) return cand;
+    }
+    return 'lshift+a';
+  }
+  return LETTERS.find(k => !keyUsed(k)) || ('K' + (state.widgets.length + 1));
+}
+
+// ============================================================
+// 组件模型
+// ============================================================
+function createWidget(preset, at) {
+  const p = ASPECTS[state.aspect];
+  const w = {
+    id: 'w' + (uidSeq++),
+    preset: preset.id,
+    key: preset.key || nextFreeKey(preset.auto || 'letter'),
+    x: at ? round4(clamp01(at.x)) : 0.5,
+    y: at ? round4(clamp01(at.y)) : 0.5,
+    mode: (preset.def && preset.def.mode) || 'momentary',
+    dx: (preset.def && preset.def.dx !== undefined) ? preset.def.dx : 0,
+    dy: (preset.def && preset.def.dy !== undefined) ? preset.def.dy : -0.3,
+    duration: (preset.def && preset.def.duration) || 250,
+    sensitivity: (preset.def && preset.def.sensitivity) || 1,
+    hold: (preset.def && preset.def.hold) || 'button',
+    positions: preset.def && preset.def.positions ? preset.def.positions.map(p2 => [p2[0], p2[1]]) : [],
+    deps: preset.def && preset.def.deps ? preset.def.deps.map(d => ({ ...d })) : []
+  };
+  if (w.preset === 'mouse') w.mouseBtn = (preset.def && preset.def.mouseBtn) || 'MOUSE_LEFT';
+  // 视口边界保护：默认位置不要贴边
+  if (!at) { w.x = 0.5; w.y = 0.5; }
+  return w;
+}
+
+function addWidget(preset, at) {
+  snapshot();
+  const w = createWidget(preset, at);
+  state.widgets.push(w);
+  state.sel = w.id;
+  render();
+  const input = inspEl.querySelector('[data-field="key"]');
+  if (input) { input.focus(); input.select(); }
+}
+
+function selected() {
+  return state.widgets.find(w => w.id === state.sel) || null;
+}
+
+// ============================================================
+// 渲染：画布
+// ============================================================
+function render() {
+  const d = dims();
+  const z = state.zoom;
+  screenEl.style.setProperty('--z', String(z));
+  screenEl.style.width = (d.w * z) + 'px';
+  screenEl.style.height = (d.h * z) + 'px';
+  linksEl.setAttribute('viewBox', '0 0 ' + d.w + ' ' + d.h);
+  $('grid').classList.toggle('off', !state.grid);
+  $('bgimg').style.backgroundImage = state.bg ? 'url("' + state.bg + '")' : 'none';
+  emptyEl.style.display = state.widgets.length ? 'none' : 'grid';
+
+  overlaysEl.innerHTML = '';
+  linksEl.innerHTML = '';
+  els.clear();
+
+  for (const w of state.widgets) buildWidget(w);
+  drawLinks();
+  renderInspector();
+  updateJSON();
+  updateStatus();
+}
+
+function buildWidget(w) {
+  const isSel = w.id === state.sel;
+  const root = document.createElement('div');
+  root.className = 'w' + (isSel ? ' sel' : '') + clsFor(w);
+  root.style.left = (w.x * 100) + '%';
+  root.style.top = (w.y * 100) + '%';
+  root.dataset.id = w.id;
+
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = displayKey(w);
+  root.appendChild(label);
+
+  if (w.preset !== 'virtual' && w.preset !== 'lock') {
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = tagFor(w);
+    root.appendChild(tag);
+  }
+
+  root.addEventListener('pointerdown', ev => onWidgetDown(ev, w));
+  overlaysEl.appendChild(root);
+  els.set(w.id, { root: root });
+
+  // 多点：额外位置的拖动点
+  if (w.positions.length) {
+    w.positions.forEach((pos, i) => {
+      const dot = document.createElement('div');
+      dot.className = 'dot sub';
+      dot.style.left = (pos[0] * 100) + '%';
+      dot.style.top = (pos[1] * 100) + '%';
+      dot.dataset.id = w.id;
+      dot.dataset.pos = String(i);
+      dot.addEventListener('pointerdown', ev => onSubDotDown(ev, w, i));
+      overlaysEl.appendChild(dot);
+    });
+  }
+
+  // 滑动：终点把手
+  if (w.preset === 'slide' && isSel) {
+    const end = document.createElement('div');
+    end.className = 'dot end';
+    end.style.left = ((w.x + w.dx) * 100) + '%';
+    end.style.top = ((w.y + w.dy) * 100) + '%';
+    end.addEventListener('pointerdown', ev => onEndDotDown(ev, w));
+    overlaysEl.appendChild(end);
+  }
+}
+
+function clsFor(w) {
+  if (w.preset === 'motion' || w.preset === 'motionAlways') return ' motion';
+  if (w.preset === 'virtual') return ' virtual';
+  if (w.preset === 'lock') return ' lock';
+  if (w.preset === 'mouse') return ' mouse';
+  return '';
+}
+
+function tagFor(w) {
+  switch (w.preset) {
+    case 'tap': return '点击';
+    case 'slide': return '滑动';
+    case 'multi': return (1 + w.positions.length) + ' 指';
+    case 'toggle': return '开关';
+    case 'motion': return '视角';
+    case 'motionAlways': return '常驻';
+    case 'virtual': return '虚拟';
+    case 'combo': return '组合';
+    case 'mouse': return '鼠标';
+    case 'lock': return '锁定';
+    case 'dep': return '条件';
+    default: return '';
+  }
+}
+
+function displayKey(w) {
+  if (w.preset === 'motion' || w.preset === 'motionAlways') return '视角';
+  if (w.preset === 'lock') return '左键锁定';
+  if (w.preset === 'mouse') return w.key.replace('MOUSE_', '');
+  return w.key || '未命名';
+}
+
+function drawLinks() {
+  const d = dims();
+  let html = '';
+  for (const w of state.widgets) {
+    if (w.preset === 'slide') {
+      const x1 = w.x * d.w, y1 = w.y * d.h;
+      const x2 = (w.x + w.dx) * d.w, y2 = (w.y + w.dy) * d.h;
+      html += '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 +
+        '" stroke="#f5a524" stroke-width="2" stroke-dasharray="6 5" opacity="0.9"/>';
+      html += '<circle cx="' + x2 + '" cy="' + y2 + '" r="5" fill="none" stroke="#f5a524" stroke-width="2"/>';
+    }
+    if (w.positions.length) {
+      for (const pos of w.positions) {
+        html += '<line x1="' + (w.x * d.w) + '" y1="' + (w.y * d.h) + '" x2="' + (pos[0] * d.w) +
+          '" y2="' + (pos[1] * d.h) + '" stroke="rgba(79,140,255,.55)" stroke-width="1.5" stroke-dasharray="4 4"/>';
+      }
+    }
+  }
+  linksEl.innerHTML = html;
+}
+
+function updateGeom(w) {
+  const rec = els.get(w.id);
+  if (rec) {
+    rec.root.style.left = (w.x * 100) + '%';
+    rec.root.style.top = (w.y * 100) + '%';
+  }
+  drawLinks();
+  // 属性面板里的坐标数字
+  const q = s => inspEl.querySelector(s);
+  const fx = q('[data-num="x"]'), fy = q('[data-num="y"]');
+  if (fx) fx.textContent = w.x.toFixed(4);
+  if (fy) fy.textContent = w.y.toFixed(4);
+}
+
+// ============================================================
+// 拖拽
+// ============================================================
+function toNorm(clientX, clientY) {
+  const r = screenEl.getBoundingClientRect();
+  return {
+    x: clamp01((clientX - r.left) / r.width),
+    y: clamp01((clientY - r.top) / r.height)
+  };
+}
+
+function onWidgetDown(ev, w) {
+  if (ev.button !== 0) return;
+  ev.stopPropagation();
+  ev.preventDefault();
+  if (state.sel !== w.id) { state.sel = w.id; render(); }
+  snapshot();
+  const start = toNorm(ev.clientX, ev.clientY);
+  const ox = w.x, oy = w.y;
+  const origin = w.positions.map(p => [...p]);
+  const root = els.get(w.id) && els.get(w.id).root;
+  if (root) root.style.cursor = 'grabbing';
+
+  const move = e2 => {
+    const p = toNorm(e2.clientX, e2.clientY);
+    let nx = clamp01(ox + (p.x - start.x));
+    let ny = clamp01(oy + (p.y - start.y));
+    if (e2.shiftKey) { nx = Math.round(nx * 20) / 20; ny = Math.round(ny * 20) / 20; }
+    const ddx = nx - w.x, ddy = ny - w.y;
+    w.x = round4(nx);
+    w.y = round4(ny);
+    if (w.positions.length) {
+      w.positions = w.positions.map((p2, i) => [round4(clamp01(origin[i][0] + (w.x - ox))), round4(clamp01(origin[i][1] + (w.y - oy)))]);
+      repositionSubDots(w);
+    }
+    updateGeom(w);
+    updateJSON();
+  };
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    renderInspector();
+    updateJSON();
+    updateStatus();
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
+function repositionSubDots(w) {
+  const dots = overlaysEl.querySelectorAll('.dot.sub[data-id="' + w.id + '"]');
+  dots.forEach(dot => {
+    const i = Number(dot.dataset.pos);
+    const pos = w.positions[i];
+    if (pos) { dot.style.left = (pos[0] * 100) + '%'; dot.style.top = (pos[1] * 100) + '%'; }
+  });
+}
+
+function onSubDotDown(ev, w, index) {
+  if (ev.button !== 0) return;
+  ev.stopPropagation();
+  ev.preventDefault();
+  snapshot();
+  const move = e2 => {
+    const p = toNorm(e2.clientX, e2.clientY);
+    w.positions[index] = [round4(p.x), round4(p.y)];
+    const dot = overlaysEl.querySelector('.dot.sub[data-id="' + w.id + '"][data-pos="' + index + '"]');
+    if (dot) { dot.style.left = (p.x * 100) + '%'; dot.style.top = (p.y * 100) + '%'; }
+    drawLinks();
+    updateJSON();
+  };
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    renderInspector();
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
+function onEndDotDown(ev, w) {
+  if (ev.button !== 0) return;
+  ev.stopPropagation();
+  ev.preventDefault();
+  snapshot();
+  const move = e2 => {
+    const p = toNorm(e2.clientX, e2.clientY);
+    w.dx = round4(Math.min(1, Math.max(-1, p.x - w.x)));
+    w.dy = round4(Math.min(1, Math.max(-1, p.y - w.y)));
+    const dot = overlaysEl.querySelector('.dot.end');
+    if (dot) { dot.style.left = ((w.x + w.dx) * 100) + '%'; dot.style.top = ((w.y + w.dy) * 100) + '%'; }
+    drawLinks();
+    updateJSON();
+    const q = inspEl.querySelector('[data-field="dx"]');
+    const q2 = inspEl.querySelector('[data-field="dy"]');
+    if (q) q.value = w.dx.toFixed(3);
+    if (q2) q2.value = w.dy.toFixed(3);
+  };
+  const up = () => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    renderInspector();
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
+// ============================================================
+// 组件库
+// ============================================================
+function buildPalette() {
+  const list = $('paletteList');
+  list.innerHTML = '';
+  for (const p of PRESETS) {
+    const card = document.createElement('div');
+    card.className = 'pcard';
+    card.title = p.desc;
+    card.innerHTML =
+      '<div class="ico">' + ICONS[p.icon] + '</div>' +
+      '<div><div class="nm">' + p.name + '</div><div class="ds">' + p.desc + '</div></div>';
+    card.addEventListener('pointerdown', ev => startPaletteDrag(ev, p, card));
+    list.appendChild(card);
+  }
+}
+
+function startPaletteDrag(ev, preset, card) {
+  if (ev.button !== 0) return;
+  ev.preventDefault();
+  const ghost = document.createElement('div');
+  ghost.className = 'ghost';
+  ghost.textContent = preset.name;
+  ghost.style.left = ev.clientX + 'px';
+  ghost.style.top = ev.clientY + 'px';
+  document.body.appendChild(ghost);
+
+  let moved = false;
+  const sx = ev.clientX, sy = ev.clientY;
+
+  const move = e2 => {
+    if (Math.abs(e2.clientX - sx) + Math.abs(e2.clientY - sy) > 4) moved = true;
+    ghost.style.left = e2.clientX + 'px';
+    ghost.style.top = e2.clientY + 'px';
+  };
+  const up = e2 => {
+    document.removeEventListener('pointermove', move);
+    document.removeEventListener('pointerup', up);
+    ghost.remove();
+    const r = screenEl.getBoundingClientRect();
+    const inside = e2.clientX >= r.left && e2.clientX <= r.right &&
+                   e2.clientY >= r.top && e2.clientY <= r.bottom;
+    if (inside) {
+      addWidget(preset, toNorm(e2.clientX, e2.clientY));
+    } else if (!moved) {
+      addWidget(preset, { x: 0.5, y: 0.5 });
+    }
+  };
+  document.addEventListener('pointermove', move);
+  document.addEventListener('pointerup', up);
+}
+
+// ============================================================
+// 属性面板
+// ============================================================
+const KEY_CHIPS = [
+  ['W', 'A', 'S', 'D', 'Q', 'E', 'R', 'F', 'G', 'H', 'J', 'K', 'L', 'Z', 'X', 'C', 'V', 'B', 'N', 'M'],
+  ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+  ['Up', 'Down', 'Left', 'Right', 'Space', 'Tab', 'Esc', 'Enter'],
+  ['lshift', 'lctrl', 'lalt', 'MOUSE_LEFT', 'MOUSE_RIGHT', 'MOUSE_X1', 'MOUSE_X2']
+];
+
+function renderInspector() {
+  const w = selected();
+  $('selHint').textContent = w ? (PRESET_BY_ID[w.preset] || {}).name || '' : '未选中';
+  if (!w) {
+    inspEl.innerHTML = '<div class="empty-hint">' +
+      '从左边把组件拖到画面里开始配置。<br><br>' +
+      '· 组件名 = 绑定的按键，选中后可在下面修改<br>' +
+      '· 拖动组件调整位置（按住 <b>Shift</b> 吸附到 5% 网格）<br>' +
+      '· 一个按键要按多个位置：用「多点同按」，或给单点加位置<br>' +
+      '· 滑动组件的橙色圆点是终点，拖它改方向与距离' +
+      '</div>';
+    return;
+  }
+
+  const p = PRESET_BY_ID[w.preset] || { name: w.preset };
+  let html = '';
+  html += '<div class="fgroup"><label>按键名（组件名）</label><div class="row">' +
+    '<input class="input mono" data-field="key" value="' + escAttr(w.key) + '" spellcheck="false"' +
+    (w.preset === 'motion' || w.preset === 'motionAlways' || w.preset === 'lock' ? ' disabled' : '') + '>' +
+    '</div>';
+  if (w.preset === 'combo') {
+    html += '<div class="hintx">组合键用 <b>+</b> 连接，2~4 个成员，例如 <code>lshift+w</code>、<code>ctrl+shift+a</code>。鼠标键不能进组合。</div>';
+  } else if (w.preset === 'motion' || w.preset === 'motionAlways') {
+    html += '<div class="hintx">视角条目的键名固定为 <code>MOUSE_MOVE</code>，一个模板只能有一个。</div>';
+  } else if (w.preset === 'virtual') {
+    html += '<div class="hintx">虚拟键不点屏幕，只跟踪按下状态；其它条目可以用 <code>entry:' + escAttr(w.key) + '</code> 依赖它。</div>';
+  } else if (w.preset === 'lock') {
+    html += '<div class="hintx">左键锁定：投屏中按 <b>左 Alt</b> 开关锁定，锁定后左键按住 = 一直按住这个位置。</div>';
+  } else {
+    html += '<div class="chips">' + KEY_CHIPS.flat().map(k =>
+      '<span class="chip" data-chip="' + k + '">' + k + '</span>').join('') + '</div>';
+  }
+  html += '</div>';
+
+  // 位置
+  if (w.preset !== 'virtual') {
+    html += '<div class="fgroup"><label>位置（归一化 0~1）</label>' +
+      '<div class="num" style="margin-bottom:4px"><span class="hintx" style="margin:0;width:14px">X</span>' +
+      '<span data-num="x" style="margin-left:auto;font-variant-numeric:tabular-nums;color:#c9d7ea">' + w.x.toFixed(4) + '</span></div>' +
+      '<div class="num"><span class="hintx" style="margin:0;width:14px">Y</span>' +
+      '<span data-num="y" style="margin-left:auto;font-variant-numeric:tabular-nums;color:#c9d7ea">' + w.y.toFixed(4) + '</span></div>' +
+      '<div class="hintx">直接拖动组件即可，坐标自动换算成视频帧比例。</div></div>';
+  }
+
+  // 单点 / 多点 / 开关 / 条件：模式与位置数
+  if (w.preset === 'tap' || w.preset === 'multi' || w.preset === 'toggle' || w.preset === 'dep' || w.preset === 'combo') {
+    if (w.preset !== 'combo') {
+      html += '<div class="fgroup"><label>触发方式</label><div class="row">' +
+        '<select class="input" data-field="mode">' +
+        '<option value="momentary"' + (w.mode === 'momentary' ? ' selected' : '') + '>按住（momentary）</option>' +
+        '<option value="toggle"' + (w.mode === 'toggle' ? ' selected' : '') + '>开关（toggle）</option>' +
+        '</select></div>' +
+        (w.preset === 'combo' ? '' : '<div class="hintx">toggle 只能用于单键触控。</div>') +
+        '</div>';
+    }
+    // 位置数
+    if (w.preset !== 'combo') {
+      const total = 1 + w.positions.length;
+      html += '<div class="fgroup"><label>同时按下的位置数：' + total + '</label><div class="row">' +
+        '<button data-act="pos-add"' + (total >= 5 ? ' disabled' : '') + '>＋ 再加一个位置</button>' +
+        '<button data-act="pos-del"' + (total <= 1 ? ' disabled' : '') + '>－ 删除最后一个</button>' +
+        '</div><div class="hintx">一个按键最多同时按 5 个位置（多指）；蓝色小圆点可单独拖动。</div></div>';
+    }
+  }
+
+  // 滑动
+  if (w.preset === 'slide') {
+    html += '<div class="fgroup"><label>滑动位移（归一化，可为负）</label>' +
+      '<div class="grid2">' +
+      '<div class="num"><span class="hintx" style="margin:0;width:18px">dx</span><input class="input" type="number" step="0.01" min="-1" max="1" data-field="dx" value="' + w.dx.toFixed(3) + '"></div>' +
+      '<div class="num"><span class="hintx" style="margin:0;width:18px">dy</span><input class="input" type="number" step="0.01" min="-1" max="1" data-field="dy" value="' + w.dy.toFixed(3) + '"></div>' +
+      '</div>' +
+      '<div class="num" style="margin-top:6px"><span class="hintx" style="margin:0;width:64px">时长 ms</span>' +
+      '<input class="input" type="number" step="10" min="50" max="5000" data-field="duration" value="' + w.duration + '"></div>' +
+      '<div class="hintx">橙色圆点是终点，直接拖动更直观；时长 50~5000ms。</div></div>';
+  }
+
+  // 视角
+  if (w.preset === 'motion' || w.preset === 'motionAlways') {
+    html += '<div class="fgroup"><label>灵敏度</label>' +
+      '<div class="num"><input class="input" type="number" step="0.05" min="0.05" max="20" data-field="sensitivity" value="' + w.sensitivity + '"></div>' +
+      '<div class="hintx">1.0 = 鼠标移动 1px，视角移动 1px；范围 0.05~20。</div></div>' +
+      '<div class="fgroup"><label>手指保持方式</label><div class="row">' +
+      '<select class="input" data-field="hold">' +
+      '<option value="button"' + (w.hold === 'button' ? ' selected' : '') + '>button：按住鼠标键才转</option>' +
+      '<option value="always"' + (w.hold === 'always' ? ' selected' : '') + '>always：常驻，无需按键</option>' +
+      '</select></div></div>';
+  }
+
+  // 鼠标键
+  if (w.preset === 'mouse') {
+    html += '<div class="fgroup"><label>鼠标按键</label><div class="row">' +
+      '<select class="input" data-field="mouseBtn">' +
+      MOUSE_ORDER.map(k => '<option value="' + k + '"' + (w.key === k ? ' selected' : '') + '>' + k + '</option>').join('') +
+      '</select></div><div class="hintx">鼠标键映射到画面上的这个位置（点一下）。</div></div>';
+  }
+
+  // 依赖
+  if (w.preset !== 'lock' && w.preset !== 'mouse') {
+    html += '<div class="fgroup"><label>生效条件（depends_on，可多个同时成立）</label>';
+    if (!w.deps.length) {
+      html += '<div class="hintx" style="margin:0 0 6px">无 —— 满足映射总开关与画面状态即生效。</div>';
+    }
+    w.deps.forEach((d, i) => {
+      html += '<div class="dep">' +
+        '<input class="input mono" data-dep="' + i + '" data-dep-field="ref" value="' + escAttr(d.ref) + '" placeholder="键 / entry:名字 / flag:名字">' +
+        '<select class="input" data-dep="' + i + '" data-dep-field="state">' +
+        '<option value="pressed"' + (d.state === 'pressed' ? ' selected' : '') + '>按下</option>' +
+        '<option value="released"' + (d.state === 'released' ? ' selected' : '') + '>松开</option>' +
+        '</select>' +
+        '<button data-act="dep-del" data-idx="' + i + '" title="删除">×</button>' +
+        '</div>';
+    });
+    html += '<div class="btn-row"><button data-act="dep-add">＋ 添加条件</button></div>' +
+      '<div class="hintx">写法：<code>lshift</code>、<code>lshift+w</code>、<code>entry:虚拟键名</code>、<code>flag:mapping.enabled</code>；最多 4 个。</div></div>';
+  }
+
+  html += '<div class="fgroup"><label>操作</label><div class="btn-row">' +
+    '<button data-act="dup">复制一份</button>' +
+    '<button data-act="del" class="danger">删除</button>' +
+    '</div></div>';
+
+  inspEl.innerHTML = html;
+}
+
+function escAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+// 属性面板交互
+inspEl.addEventListener('input', ev => {
+  const t = ev.target;
+  const w = selected();
+  if (!w) return;
+
+  if (t.dataset.field === 'key') {
+    const old = w.key;
+    w.key = t.value.trim();
+    updateLabel(w);
+    syncMouseField(w);
+    void old;
+    updateJSON(); updateStatus();
+    return;
+  }
+  if (t.dataset.field === 'mode') {
+    w.mode = t.value;
+    updateJSON(); updateStatus();
+    return;
+  }
+  if (t.dataset.field === 'dx' || t.dataset.field === 'dy') {
+    const v = parseFloat(t.value);
+    if (Number.isFinite(v)) {
+      w[t.dataset.field] = Math.min(1, Math.max(-1, v));
+      drawLinks(); updateJSON();
+      const dot = overlaysEl.querySelector('.dot.end');
+      if (dot) { dot.style.left = ((w.x + w.dx) * 100) + '%'; dot.style.top = ((w.y + w.dy) * 100) + '%'; }
+    }
+    return;
+  }
+  if (t.dataset.field === 'duration') {
+    const v = parseInt(t.value, 10);
+    if (Number.isFinite(v)) { w.duration = Math.min(5000, Math.max(50, v)); updateJSON(); }
+    return;
+  }
+  if (t.dataset.field === 'sensitivity') {
+    const v = parseFloat(t.value);
+    if (Number.isFinite(v)) { w.sensitivity = Math.min(20, Math.max(0.05, v)); updateJSON(); }
+    return;
+  }
+  if (t.dataset.field === 'hold') {
+    w.hold = t.value; updateJSON();
+    return;
+  }
+  if (t.dataset.field === 'mouseBtn') {
+    w.key = t.value; updateLabel(w); updateJSON(); updateStatus();
+    return;
+  }
+  if (t.dataset.dep !== undefined) {
+    const i = Number(t.dataset.dep);
+    const f = t.dataset.depField;
+    if (w.deps[i]) { w.deps[i][f] = t.value; updateJSON(); }
+    return;
+  }
+});
+
+inspEl.addEventListener('change', ev => {
+  const t = ev.target;
+  if (t.dataset.field === 'mode' || t.dataset.field === 'hold') {
+    updateJSON(); updateStatus();
+  }
+  if (t.dataset.dep !== undefined) updateJSON();
+});
+
+inspEl.addEventListener('click', ev => {
+  const chip = ev.target.closest('[data-chip]');
+  if (chip) {
+    const w = selected();
+    if (!w) return;
+    snapshot();
+    w.key = chip.dataset.chip;
+    renderInspector(); updateLabel(w); updateJSON(); updateStatus();
+    return;
+  }
+  const btn = ev.target.closest('[data-act]');
+  if (!btn) return;
+  const w = selected();
+  if (!w) return;
+  const act = btn.dataset.act;
+  if (act === 'del') {
+    snapshot();
+    state.widgets = state.widgets.filter(x => x.id !== w.id);
+    state.sel = null;
+    render();
+  } else if (act === 'dup') {
+    snapshot();
+    const copy = JSON.parse(JSON.stringify(w));
+    copy.id = 'w' + (uidSeq++);
+    copy.key = nextFreeKey(PRESET_BY_ID[w.preset].auto || 'letter');
+    copy.x = round4(clamp01(w.x + 0.06));
+    copy.y = round4(clamp01(w.y + 0.06));
+    copy.positions = w.positions.map(p => [round4(clamp01(p[0] + 0.06)), round4(clamp01(p[1] + 0.06))]);
+    state.widgets.push(copy);
+    state.sel = copy.id;
+    render();
+  } else if (act === 'pos-add') {
+    snapshot();
+    w.positions.push([round4(clamp01(w.x + 0.08)), round4(clamp01(w.y + 0.08))]);
+    render();
+  } else if (act === 'pos-del') {
+    snapshot();
+    w.positions.pop();
+    render();
+  } else if (act === 'dep-add') {
+    snapshot();
+    if (w.deps.length < 4) { w.deps.push({ ref: 'lshift', state: 'pressed' }); renderInspector(); updateJSON(); }
+  } else if (act === 'dep-del') {
+    snapshot();
+    w.deps.splice(Number(btn.dataset.idx), 1);
+    renderInspector(); updateJSON();
+  }
+});
+
+function updateLabel(w) {
+  const rec = els.get(w.id);
+  if (!rec) return;
+  const label = rec.root.querySelector('.label');
+  if (label) label.textContent = displayKey(w);
+  const tag = rec.root.querySelector('.tag');
+  if (tag) tag.textContent = tagFor(w);
+}
+
+function syncMouseField(w) {
+  if (w.preset !== 'mouse') return;
+  const sel = inspEl.querySelector('[data-field="mouseBtn"]');
+  if (sel) sel.value = w.key;
+}
+
+// ============================================================
+// 导出 / 导入
+// ============================================================
+function toMapping(w) {
+  const m = {};
+  if (w.preset === 'motion' || w.preset === 'motionAlways') {
+    m.type = 'motion';
+    m.key = 'MOUSE_MOVE';
+    m.x = round4(w.x);
+    m.y = round4(w.y);
+    m.sensitivity = Number(w.sensitivity.toFixed(2));
+    m.hold = w.hold;
+    return m;
+  }
+  if (w.preset === 'slide') {
+    m.type = 'slide';
+    m.key = w.key;
+    m.x = round4(w.x);
+    m.y = round4(w.y);
+    m.dx = round4(w.dx);
+    m.dy = round4(w.dy);
+    m.duration_ms = Math.round(w.duration);
+    return m;
+  }
+  if (w.preset === 'virtual') {
+    m.key = w.key;
+    m.virtual = true;
+    if (w.mode === 'toggle') m.mode = 'toggle';
+    return m;
+  }
+  // touch 家族（含鼠标键与锁定）
+  m.key = w.key;
+  m.x = round4(w.x);
+  m.y = round4(w.y);
+  if (w.positions.length) m.positions = w.positions.map(p => [round4(p[0]), round4(p[1])]);
+  if (w.mode === 'toggle' && w.preset !== 'combo') m.mode = 'toggle';
+  if (w.deps.length) {
+    m.depends_on = w.deps.map(d => d.ref.trim()).filter(Boolean);
+    if (m.depends_on.length === 1) { m.depends_on = m.depends_on[0]; }
+    const states = w.deps.map(d => d.state);
+    m.depends_state = states.every(s => s === states[0]) ? states[0] : states;
+  }
+  return m;
+}
+
+function buildTemplate() {
+  return {
+    name: state.template || 'default',
+    mappings: state.widgets.map(toMapping)
+  };
+}
+
+function templateText() {
+  return JSON.stringify(buildTemplate(), null, 2);
+}
+
+function updateJSON() {
+  if (!jsonOut) return;
+  jsonOut.textContent = templateText();
+}
+
+// 只做与加载器一致的“明显错误”检查
+function validate() {
+  const errs = [];
+  const seen = new Map();
+  const combos = [];
+  const slides = [];
+  let motions = 0;
+  let locks = 0;
+
+  for (const w of state.widgets) {
+    const k = (w.key || '').trim();
+    const name = k || ('('.concat(PRESET_BY_ID[w.preset].name, ')'));
+    if (!k) { errs.push('有条目没有键名'); continue; }
+    const low = k.toLowerCase();
+    if (seen.has(low)) errs.push('键名重复：' + k + '（加载器只接受第一个，重复的会被拒绝）');
+    else seen.set(low, true);
+
+    if (w.preset === 'motion' || w.preset === 'motionAlways') {
+      motions++;
+      if (w.hold !== 'button' && w.hold !== 'always') errs.push(name + '：hold 只能是 button / always');
+      if (!(w.sensitivity >= 0.05 && w.sensitivity <= 20)) errs.push(name + '：灵敏度需在 0.05~20');
+    }
+    if (w.preset === 'lock') {
+      locks++;
+      if (w.mode === 'toggle') errs.push(name + '：左键锁定不支持 toggle');
+      if (w.deps.length) errs.push(name + '：左键锁定不支持 depends_on');
+    }
+    if (w.preset === 'slide') {
+      slides.push(low);
+      if (k.indexOf('+') >= 0) errs.push(name + '：滑动只能用单个键，不能用组合键');
+      if (Math.abs(w.dx) > 1 || Math.abs(w.dy) > 1) errs.push(name + '：dx/dy 需在 -1~1');
+      if (w.positions.length) errs.push(name + '：滑动不支持多位置');
+    }
+    if (k.indexOf('+') >= 0) {
+      combos.push(low);
+      const members = k.split('+').map(s => s.trim()).filter(Boolean);
+      if (members.length < 2) errs.push(name + '：组合至少 2 个成员');
+      if (members.length > 4) errs.push(name + '：组合最多 4 个成员');
+      if (members.some(x => /^MOUSE_/i.test(x))) errs.push(name + '：鼠标键不能作为组合成员');
+      if (w.mode === 'toggle') errs.push(name + '：组合键不支持 toggle');
+      if (w.preset === 'slide') errs.push(name + '：组合键不能是滑动');
+    }
+    if (w.mode === 'toggle' && (w.preset === 'combo')) errs.push(name + '：toggle 只能用于单键');
+    if (w.positions.length > 4) errs.push(name + '：额外位置最多 4 个（含主位置共 5）');
+    if (k.toUpperCase() === 'MOUSE_MOVE' && w.preset !== 'motion' && w.preset !== 'motionAlways') {
+      errs.push(name + '：MOUSE_MOVE 必须对应视角(motion)组件');
+    }
+    for (const d of w.deps) {
+      if (!d.ref.trim()) errs.push(name + '：有空的条件');
+      const r = d.ref.trim();
+      if (/^entry:/i.test(r)) {
+        const target = r.slice(6).trim();
+        if (!state.widgets.some(x => x.key.toLowerCase() === target.toLowerCase())) {
+          errs.push(name + '：依赖的条目「' + target + '」不存在');
+        }
+      }
+      if (r.toLowerCase() === low) errs.push(name + '：不能依赖自己');
+    }
+  }
+
+  for (const c of combos) {
+    const members = c.split('+').map(s => s.trim());
+    for (const m of members) {
+      if (slides.includes(m)) errs.push('键 ' + m + ' 既是滑动键又是组合成员，滑动条目会被拒绝');
+    }
+  }
+  if (motions > 1) errs.push('视角(motion)条目只能有一个');
+  if (locks > 1) errs.push('左键锁定只能有一个');
+
+  return errs;
+}
+
+function updateStatus() {
+  const errs = validate();
+  const n = state.widgets.length;
+  const parts = [];
+  if (!n) {
+    parts.push('<span>还没有组件，把左侧组件拖到画面里</span>');
+  } else {
+    parts.push('<span>' + n + ' 个映射</span>');
+    if (errs.length) {
+      parts.push('<span class="err">' + errs.length + ' 个问题：' + errs.slice(0, 3).map(esc).join('；') + (errs.length > 3 ? ' …' : '') + '</span>');
+    } else {
+      parts.push('<span class="ok">校验通过，可直接导出</span>');
+    }
+  }
+  parts.push('<span style="margin-left:auto">导出后放到 <b>templates/' + esc(state.template || 'default') + '.json</b>，并在 scrcpy_mapping_config.json 里设 active_template</span>');
+  statusEl.innerHTML = parts.join('<span style="opacity:.4">·</span>');
+}
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function exportJSON() {
+  const errs = validate();
+  const text = templateText();
+  const fileName = (state.template || 'template') + '.json';
+
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description: 'JSON 模板', accept: { 'application/json': ['.json'] } }]
+      });
+      const wr = await handle.createWritable();
+      await wr.write(text);
+      await wr.close();
+      toast('已保存 ' + fileName + (errs.length ? '（注意：仍有 ' + errs.length + ' 个问题）' : ''));
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      // 落到下载
+    }
+  }
+  const blob = new Blob([text], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  toast('已下载 ' + fileName + (errs.length ? '（注意：仍有 ' + errs.length + ' 个问题）' : ''));
+}
+
+function fromMapping(m) {
+  const key = String(m.key || '');
+  const isMotion = String(m.type || '').toLowerCase() === 'motion';
+  const isSlide = String(m.type || '').toLowerCase() === 'slide';
+  const positions = Array.isArray(m.positions) ? m.positions.filter(p => Array.isArray(p) && p.length >= 2).map(p => [Number(p[0]), Number(p[1])]) : [];
+  let preset = 'tap';
+  if (isMotion) preset = (m.hold === 'always') ? 'motionAlways' : 'motion';
+  else if (isSlide) preset = 'slide';
+  else if (m.virtual === true) preset = 'virtual';
+  else if (key.toUpperCase() === 'MOUSE_LEFT_LOCKED' || key.toUpperCase() === 'LEFT_CLICK_LOCKED') preset = 'lock';
+  else if (/^MOUSE_(LEFT|RIGHT|MIDDLE|X1|X2)$/i.test(key)) preset = 'mouse';
+  else if (key.indexOf('+') >= 0) preset = 'combo';
+  else if (m.mode === 'toggle') preset = 'toggle';
+  else if (positions.length) preset = 'multi';
+  else if (Array.isArray(m.depends_on) && m.depends_on.length) preset = 'dep';
+
+  let deps = [];
+  if (m.depends_on !== undefined) {
+    const refs = Array.isArray(m.depends_on) ? m.depends_on : [m.depends_on];
+    const statesRaw = m.depends_state === undefined ? [] : (Array.isArray(m.depends_state) ? m.depends_state : [m.depends_state]);
+    deps = refs.map((r, i) => {
+      const st = statesRaw.length === 1 ? statesRaw[0] : (statesRaw[i] || 'pressed');
+      const neg = /released|inactive|off|disabled/i.test(String(st));
+      return { ref: String(r), state: neg ? 'released' : 'pressed' };
+    });
+  }
+
+  const w = {
+    id: 'w' + (uidSeq++),
+    preset: preset,
+    key: key,
+    x: Number.isFinite(Number(m.x)) ? Number(m.x) : 0.5,
+    y: Number.isFinite(Number(m.y)) ? Number(m.y) : 0.5,
+    mode: (m.mode === 'toggle') ? 'toggle' : 'momentary',
+    dx: Number.isFinite(Number(m.dx)) ? Number(m.dx) : 0,
+    dy: Number.isFinite(Number(m.dy)) ? Number(m.dy) : -0.3,
+    duration: Number.isFinite(Number(m.duration_ms)) ? Number(m.duration_ms) : 250,
+    sensitivity: Number.isFinite(Number(m.sensitivity)) ? Number(m.sensitivity) : 1,
+    hold: (m.hold === 'always') ? 'always' : 'button',
+    positions: positions,
+    deps: deps
+  };
+  return w;
+}
+
+function importTemplate(json) {
+  if (!json || !Array.isArray(json.mappings)) throw new Error('不是模板 JSON：缺少 mappings 数组');
+  snapshot();
+  state.widgets = json.mappings.map(fromMapping);
+  if (json.name) { state.template = String(json.name); $('tplName').value = state.template; }
+  state.sel = state.widgets.length ? state.widgets[0].id : null;
+  render();
+  toast('已导入 ' + state.widgets.length + ' 个映射');
+}
+
+// ============================================================
+// 撤销
+// ============================================================
+function snapshot() {
+  undoStack.push(JSON.stringify({ widgets: state.widgets, sel: state.sel }));
+  if (undoStack.length > 60) undoStack.shift();
+  redoStack.length = 0;
+}
+function undo() {
+  if (!undoStack.length) return;
+  redoStack.push(JSON.stringify({ widgets: state.widgets, sel: state.sel }));
+  const s = JSON.parse(undoStack.pop());
+  state.widgets = s.widgets; state.sel = s.sel;
+  render();
+}
+function redo() {
+  if (!redoStack.length) return;
+  undoStack.push(JSON.stringify({ widgets: state.widgets, sel: state.sel }));
+  const s = JSON.parse(redoStack.pop());
+  state.widgets = s.widgets; state.sel = s.sel;
+  render();
+}
+
+// ============================================================
+// 杂项 UI
+// ============================================================
+let toastTimer = null;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function computeFit() {
+  if (state.zoomMode !== 'fit') return;
+  const vp = $('viewport');
+  const d = dims();
+  const availW = vp.clientWidth - 44;
+  const availH = vp.clientHeight - 44;
+  const z = Math.max(0.2, Math.min(availW / d.w, availH / d.h));
+  state.zoom = Math.round(z * 100) / 100;
+}
+
+function relayout() {
+  computeFit();
+  render();
+}
+
+// 工具栏
+$('tplName').addEventListener('input', e => {
+  state.template = e.target.value.trim() || 'default';
+  updateJSON();
+  updateStatus();
+});
+$('aspectSel').addEventListener('change', e => {
+  state.aspect = e.target.value;
+  state.sel = null;
+  relayout();
+});
+$('zoomSel').addEventListener('change', e => {
+  const v = e.target.value;
+  state.zoomMode = v;
+  if (v !== 'fit') state.zoom = Number(v);
+  relayout();
+});
+$('btnBg').addEventListener('click', () => $('fileImg').click());
+
+function loadImageFile(f) {
+  if (!f || !/^image\//.test(f.type || '')) return;
+  const fr = new FileReader();
+  fr.onload = () => { state.bg = fr.result; render(); toast('背景图已载入：把组件对齐到画面上的按钮'); };
+  fr.readAsDataURL(f);
+}
+
+$('fileImg').addEventListener('change', e => {
+  loadImageFile(e.target.files && e.target.files[0]);
+  e.target.value = '';
+});
+
+// 直接把截图拖进画面，或 Ctrl+V 粘贴剪贴板里的截图
+screenEl.addEventListener('dragover', e => e.preventDefault());
+screenEl.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  loadImageFile(f);
+});
+document.addEventListener('paste', e => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const it of items) {
+    if (it.type && it.type.indexOf('image/') === 0) {
+      loadImageFile(it.getAsFile());
+      break;
+    }
+  }
+});
+$('btnImport').addEventListener('click', () => $('fileJson').click());
+$('fileJson').addEventListener('change', e => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  const fr = new FileReader();
+  fr.onload = () => {
+    try { importTemplate(JSON.parse(fr.result)); }
+    catch (err) { toast('导入失败：' + err.message); }
+  };
+  fr.readAsText(f);
+  e.target.value = '';
+});
+$('btnExport').addEventListener('click', exportJSON);
+$('btnCopy').addEventListener('click', async () => {
+  const text = templateText();
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('JSON 已复制到剪贴板');
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); ta.remove();
+    toast('JSON 已复制到剪贴板');
+  }
+});
+$('btnClear').addEventListener('click', () => {
+  if (!state.widgets.length) return;
+  if (!confirm('清空当前所有组件？')) return;
+  snapshot();
+  state.widgets = []; state.sel = null;
+  render();
+});
+
+// 画布空白点击取消选中
+screenEl.addEventListener('pointerdown', ev => {
+  if (ev.target === screenEl || ev.target.classList.contains('overlays') ||
+      ev.target.classList.contains('grid') || ev.target.classList.contains('bgimg')) {
+    if (state.sel) { state.sel = null; render(); }
+  }
+});
+
+// 键盘快捷键
+document.addEventListener('keydown', ev => {
+  const tag = (ev.target.tagName || '').toLowerCase();
+  const inField = tag === 'input' || tag === 'select' || tag === 'textarea';
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') {
+    ev.preventDefault();
+    if (ev.shiftKey) redo(); else undo();
+    return;
+  }
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'd') {
+    if (inField) return;
+    ev.preventDefault();
+    const btn = inspEl.querySelector('[data-act="dup"]');
+    if (btn) btn.click();
+    return;
+  }
+  if (inField) return;
+  const w = selected();
+  if (!w) return;
+  if (ev.key === 'Delete' || ev.key === 'Backspace') {
+    ev.preventDefault();
+    const btn = inspEl.querySelector('[data-act="del"]');
+    if (btn) btn.click();
+    return;
+  }
+  const step = ev.shiftKey ? 0.01 : 0.002;
+  const moves = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+  if (moves[ev.key] && w.preset !== 'virtual') {
+    ev.preventDefault();
+    w.x = round4(clamp01(w.x + moves[ev.key][0]));
+    w.y = round4(clamp01(w.y + moves[ev.key][1]));
+    updateGeom(w);
+    updateJSON();
+  }
+});
+
+window.addEventListener('resize', () => { relayout(); });
+
+// ============================================================
+// 启动
+// ============================================================
+buildPalette();
+relayout();
+
+// 首次打开放一个示例，方便直接看到效果
+if (!state.widgets.length) {
+  const demo = [
+    { preset: 'tap', key: 'J', x: 0.78, y: 0.62 },
+    { preset: 'slide', key: 'Up', x: 0.2, y: 0.62, dx: 0, dy: -0.3, duration: 250 },
+    { preset: 'motionAlways', key: 'MOUSE_MOVE', x: 0.5, y: 0.5, sensitivity: 1, hold: 'always' }
+  ];
+  for (const d of demo) {
+    const p = PRESET_BY_ID[d.preset];
+    const w = createWidget(p, { x: d.x, y: d.y });
+    Object.assign(w, d);
+    w.id = 'w' + (uidSeq++);
+    state.widgets.push(w);
+  }
+  render();
+}
+</script>
+</body>
+</html>
