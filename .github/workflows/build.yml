@@ -3,7 +3,8 @@ name: Build scrcpy Windows Client
 on:
   push:
     branches:
-      - 'trae/**'
+      - 'master'      # 主分支：推送后自动编译并发布
+      - 'trae/**'     # 功能分支：保留原有触发方式
   workflow_dispatch:
     inputs:
       tag_name:
