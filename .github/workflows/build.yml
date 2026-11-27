@@ -91,38 +91,50 @@ jobs:
       - name: 编译
         run: ninja -C build
 
-      - name: 收集运行时文件
+      - name: 整理安装目录结构
         run: |
-          mkdir -p dist/scrcpy-win64
-          cp build/app/scrcpy.exe dist/scrcpy-win64/scrcpy.exe
-          cp server-artifact/scrcpy-server dist/scrcpy-win64/scrcpy-server
-          # 收集运行时需要的 MinGW DLL
-          ldd build/app/scrcpy.exe | grep -E 'ucrt64|mingw64' | awk '{print $3}' | xargs -I{} cp {} dist/scrcpy-win64/ || true
-          # 复制模板和配置
-          if [ -d templates ]; then
-            cp -r templates dist/scrcpy-win64/
-          fi
-          if [ -f scrcpy_mapping_config.json ]; then
-            cp scrcpy_mapping_config.json dist/scrcpy-win64/
-          fi
-          # 打包成 payload.zip，供启动器内嵌
-          cd dist/scrcpy-win64
-          zip -rq ../payload.zip .
-          cd ..
-          ls -lh payload.zip
+          mkdir -p dist/dll
+          # 真正的 scrcpy 作为核心放进 dll\，控制面板在根目录
+          cp build/app/scrcpy.exe dist/dll/scrcpy-core.exe
+          cp server-artifact/scrcpy-server dist/scrcpy-server
+          # 安装程序用根目录 version.txt 判断新装/升级
+          echo "${SCRCPY_VERSION}.${{ github.run_number }}" > dist/version.txt
+          # 运行时 DLL 与核心放一起；控制面板自身由 Tauri 静态链接
+          ldd build/app/scrcpy.exe | grep -E 'ucrt64|mingw64' | awk '{print $3}' | xargs -I{} cp {} dist/dll/ || true
+          if [ -d templates ]; then cp -r templates dist/templates; fi
+          if [ -f scrcpy_mapping_config.json ]; then cp scrcpy_mapping_config.json dist/; fi
+          echo "DLL count: $(find dist/dll -type f | wc -l)"
 
-      - name: 编译单文件启动器
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 构建 Tauri 控制面板
+        shell: pwsh
+        working-directory: tauri-app
+        run: |
+          npm install
+          npx tauri build --no-bundle
+          Copy-Item src-tauri/target/release/scrcpy-control-panel.exe ../dist/scrcpy.exe
+          Get-Item ../dist/scrcpy.exe | Select-Object Name, Length
+
+      - name: 打包整个安装目录
         run: |
           cd dist
-          # 把 payload.zip 作为二进制数据段嵌入启动器
-          objcopy -I binary -O pe-x86-64 -B i386:x86-64 payload.zip payload.o
-          gcc -O2 -s -o scrcpy-portable.exe ../windows/portable_launcher.c payload.o
-          ls -lh scrcpy-portable.exe
+          zip -r ../scrcpy-win64.zip .
+          cd ..
+          ls -lh scrcpy-win64.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-package
-          path: dist/scrcpy-portable.exe
+          path: scrcpy-win64.zip
 
   # ==================== 创建 Release ====================
   release:
@@ -172,11 +184,12 @@ jobs:
             - `F5`：打开/关闭内置管理面板
 
             ### 使用
-            1. 下载并双击 `scrcpy-portable.exe` 即可投屏，无需解压、无需担心 DLL 散落或缺失。
-            2. 首次运行会自动把运行文件释放到 `%LOCALAPPDATA%\scrcpy-portable\<版本哈希>\`，之后直接双击同一个 exe 即可。
-            3. 按 `F5` 打开内置管理面板编辑模板；模板和配置保存在释放出的运行目录中，同一版本内修改会保留。
+            1. 下载 `scrcpy-win64.zip` 并解压到一个固定目录。
+            2. 双击根目录的 `scrcpy.exe` 打开控制面板，在里面配置参数并点“启动投屏”。
+            3. 真正的投屏程序在 `dll\scrcpy-core.exe`；模板在 `templates\`，映射配置在 `scrcpy_mapping_config.json`，启动参数在 `launch_options.json`。
+            4. 需要 WebView2 Runtime（Win11 / 新版 Win10 通常已内置）。
 
             编译时间：${{ github.event.repository.updated_at }}
           draft: false
           prerelease: false
-          files: artifacts/scrcpy-portable.exe
+          files: artifacts/scrcpy-win64.zip

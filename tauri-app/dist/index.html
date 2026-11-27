@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>scrcpy 控制面板</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-theme="hive-light">
+<div class="app">
+  <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark"><svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l8.6 5v10L12 22l-8.6-5V7z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 7l4.5 2.6v5.2L12 17.4l-4.5-2.6V9.6z" fill="currentColor" opacity=".55"/></svg></div>
+      <div><div class="brand-name">scrcpy</div><div class="brand-sub">控制面板</div></div>
+    </div>
+    <ul class="nav">
+      <li data-page="launch" class="active"><span class="ni">▶</span>启动</li>
+      <li data-page="args"><span class="ni">⚙</span>启动参数</li>
+      <li data-page="vars"><span class="ni">{ }</span>变量</li>
+      <li data-page="templates"><span class="ni">▤</span>映射模板</li>
+      <li data-page="settings"><span class="ni">◎</span>设置</li>
+    </ul>
+    <div class="side-foot"><span id="sideVersion">v—</span></div>
+  </nav>
+
+  <main class="main">
+    <header class="topbar">
+      <h1 id="pageTitle">启动</h1>
+      <div class="top-actions">
+        <button id="themeToggle" class="icon-btn" title="切换明暗主题">◐</button>
+      </div>
+    </header>
+
+    <section class="page" id="page-launch">
+      <div class="card hero">
+        <div class="hero-main">
+          <div class="hero-title">一键开始投屏</div>
+          <div class="hero-sub" id="heroStatus">核心程序状态检测中…</div>
+        </div>
+        <div class="hero-btns">
+          <button id="btnLaunch" class="btn primary lg">启动投屏</button>
+          <button id="btnStop" class="btn ghost lg">停止</button>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h2>设备</h2>
+          <label class="field"><span>ADB 序列号（留空自动选择）</span>
+            <div class="row"><input id="deviceInput" type="text" placeholder="例如 abc123 或 127.0.0.1:5555">
+              <button id="btnRefreshDevices" class="btn ghost">刷新</button></div>
+          </label>
+          <div id="deviceList" class="chips"></div>
+        </div>
+        <div class="card">
+          <h2>当前配置摘要</h2>
+          <div id="configSummary" class="summary"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>命令预览</h2>
+        <div class="row"><pre id="commandPreview" class="preview">—</pre>
+          <button id="btnCopyCmd" class="btn ghost">复制</button></div>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-args">
+      <div class="card">
+        <h2>启动参数</h2>
+        <p class="hint">参数名不带 <code>--</code>。布尔项勾选即加该 flag；字符串/数字项转成 <code>--key=value</code>。</p>
+        <div id="argsForm" class="args-grid"></div>
+        <label class="field"><span>额外参数（原样追加）</span>
+          <input id="extraArgs" type="text" placeholder="例如 --video-codec=h265 --max-fps=60"></label>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-vars">
+      <div class="card">
+        <h2>变量</h2>
+        <p class="hint">在参数里用 <code>${name}</code> 引用；启动时展开一层。</p>
+        <div id="varRows" class="var-rows"></div>
+        <button id="btnAddVar" class="btn ghost">+ 添加变量</button>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-templates">
+      <div class="grid-tpl">
+        <div class="card">
+          <div class="row between"><h2>模板列表</h2><button id="btnNewTpl" class="btn ghost small">+ 新建</button></div>
+          <div id="tplList" class="tpl-list"></div>
+        </div>
+        <div class="card">
+          <div class="row between"><h2>JSON 编辑器</h2><span id="tplStatus" class="badge">未选择</span></div>
+          <textarea id="tplEditor" class="editor" spellcheck="false"></textarea>
+          <div class="row"><button id="btnSaveTpl" class="btn primary">保存</button>
+            <button id="btnDupTpl" class="btn ghost">复制</button>
+            <button id="btnDelTpl" class="btn danger">删除</button></div>
+          <p class="hint">坐标 <code>x/y</code> 为 0.0~1.0 归一化值。保存前会校验 JSON 合法性。</p>
+        </div>
+      </div>
+      <div class="card">
+        <h2>映射配置</h2>
+        <div id="mappingCfg" class="summary"></div>
+        <button id="btnSaveMapping" class="btn ghost">保存映射配置</button>
+      </div>
+    </section>
+
+    <section class="page hidden" id="page-settings">
+      <div class="card">
+        <h2>外观</h2>
+        <label class="field"><span>主题</span>
+          <select id="themeSelect"><option value="hive-light">Hive 浅色</option><option value="hive-dark">Hive 深色</option></select></label>
+      </div>
+      <div class="card">
+        <h2>安装信息</h2>
+        <div id="appInfo" class="summary"></div>
+        <button id="btnOpenDir" class="btn ghost">打开安装根目录</button>
+      </div>
+      <div class="card">
+        <h2>关于</h2>
+        <p class="hint">基于 scrcpy 的映射增强分支。上游官方仓库：<a href="https://github.com/Genymobile/scrcpy" target="_blank">Genymobile/scrcpy</a></p>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+<script src="main.js"></script>
+</body>
+</html>

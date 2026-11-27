@@ -1,0 +1,12 @@
+{
+  "name": "scrcpy-control-panel",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Tauri control panel for scrcpy",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}
