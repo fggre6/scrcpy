@@ -1,6 +1,6 @@
 # Debug Session: mapping-input-stalls
-- **Status**: [FIXED — pending runtime verification]
-- **progress_status**: verified-by-log, fix applied
+- **Status**: [CLOSED — fix verified by runtime log]
+- **progress_status**: verified-by-log, fix applied and confirmed
 - **Issue**: Mouse motion mapping feels delayed and occasionally stops responding briefly.
 - **Project Root**: d:\DSH-GZQ\scrcpy-Cloud to Local Repo
 - **Evidence Source**: Existing project stderr logging (LOGW/LOGE); HTTP evidence files are not used because the user forbids creating or deleting files outside the project.
@@ -54,15 +54,29 @@ throttle constant was moved above the tick so both paths share it. Diagnostic
 logs B and D now report `runId=post-fix` so a verification capture can be
 distinguished from the pre-fix run.
 
-Expected result: A lines should become rare (only genuine >8 ms frame gaps),
-and B intervals should lose the 100 ms+ outliers. Re-capture stderr with view
-mode active to confirm.
+## Post-fix verification (session=mapping-input-stalls run=post-fix, 33.05 s, 281 lines)
+
+- **A: FIXED.** 230 lines, but elapsed since last injection dropped to
+  min 8 ms / p50 12.5 ms / p90 21.5 ms / max 75.5 ms. `>100 ms` went from
+  152 lines to **0**; `>50 ms` only 3 lines. The 800 ms-class hangs are gone:
+  a pending delta is now injected within a few frames instead of waiting for
+  the next mouse event.
+- **B: no longer indicates hangs.** Intervals p50 22 ms / p90 45 ms; the 4
+  remaining `>100 ms` readings (517/361/422/514 ms) each had only 0–6 A lines
+  before them, with A max stagnation 0–75.5 ms. They are genuine idle gaps
+  between injection bursts (sparse mouse input), not accumulated pending
+  deltas. The pre-fix B outliers, by contrast, coincided with multi-hundred-ms
+  A hangs.
+- One `capture-delta-discarded` line still carried the old `pre-fix` tag (the
+  D log inside `motion_feed()` was missed in the first retag); retagged to
+  `post-fix` so future captures are unambiguous.
 
 ## Verification Conclusion
-Root cause identified from runtime logs and fixed in code; one post-fix runtime
-capture is still needed to close the loop.
+Root cause confirmed and fix verified by runtime logs. The view-mode latency
+regression (hundreds-of-ms pending hangs) is resolved. Remaining long B
+intervals are expected idle periods driven by sparse mouse input, not a defect.
 
 ## Final Evidence Gate
-- **Evidence Sources**: stderr logs from real mouse motion (pre-fix capture analysed).
-- **progress_status**: fix applied, awaiting post-fix capture.
-- **Hypothesis Conclusions**: A CONFIRMED and fixed; B symptom of A; C RULED OUT; D RULED OUT (minor contributor only).
+- **Evidence Sources**: pre-fix and post-fix stderr captures from real mouse motion.
+- **progress_status**: verified; session closed.
+- **Hypothesis Conclusions**: A CONFIRMED and fixed; B symptom of A (idle gaps remain, benign); C RULED OUT; D RULED OUT (minor contributor only).

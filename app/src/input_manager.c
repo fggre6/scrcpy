@@ -462,7 +462,7 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
         im->motion.pend_nx = 0.0;
         im->motion.pend_ny = 0.0;
         // #region debug-point D:capture-delta-discarded
-        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=post-fix "
              "hypothesisId=D location=input_manager.c:motion_feed "
              "msg=capture-delta-discarded now=%" PRItick " xrel=%f yrel=%f",
              sc_tick_now(), (double) xrel, (double) yrel);
