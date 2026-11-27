@@ -1,3 +1,16 @@
+// Tauri v2 exposes its JS API on window.__TAURI__ only when
+// app.withGlobalTauri = true. Fail loudly here instead of leaving every
+// button silently dead (the bug this replaced).
+if (!window.__TAURI__ || !window.__TAURI__.core || !window.__TAURI__.core.invoke) {
+  document.addEventListener('DOMContentLoaded', () => {
+    const t = document.getElementById('toast');
+    if (t) {
+      t.textContent = 'Tauri API 未加载：请确认 tauri.conf.json 里 app.withGlobalTauri = true';
+      t.classList.add('show');
+    }
+  });
+  throw new Error('window.__TAURI__.core.invoke unavailable; check withGlobalTauri');
+}
 const { invoke } = window.__TAURI__.core;
 
 const $ = (id) => document.getElementById(id);
