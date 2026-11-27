@@ -105,6 +105,12 @@ inject_entry(struct sc_input_manager *im, struct sc_mapping_entry *e,
     return ok;
 }
 
+// A MOVE is droppable and the control queue holds 60 messages, so motion is
+// throttled instead of flooding: at most one injected MOVE every 8 ms. Deltas
+// received in between are accumulated and applied on the next injection, so
+// the total displacement still matches the mouse movement.
+#define MOTION_MIN_INTERVAL_MS 8
+
 // ==================== 滑动（hold-to-slide） ====================
 
 // Rate limits: a slide must not be able to flood the control queue, and a
@@ -124,6 +130,9 @@ motion_stop(struct sc_input_manager *im);
 
 static void
 motion_set_capture(struct sc_input_manager *im, bool on);
+
+static void
+motion_flush(struct sc_input_manager *im);
 
 static bool
 dep_ok(struct sc_input_manager *im, struct sc_mapping_entry *e);
@@ -252,6 +261,20 @@ sc_input_manager_tick(struct sc_input_manager *im) {
         motion_stop(im);
     }
 
+    // Time-based flush of the pending displacement. Mouse motion is driven by
+    // events, but a trailing delta can be left accumulated when the pointer
+    // stops or moves slower than the throttle: without this, it stays pending
+    // until the next motion event (observed up to 852 ms), which is perceived
+    // as high latency and an abrupt delayed jump. The event loop calls this
+    // tick on every frame (and on every input event), so a stale delta is
+    // injected within one throttle interval even with no further mouse input.
+    if (im->motion.active && !blocked
+            && (im->motion.pend_nx != 0.0 || im->motion.pend_ny != 0.0)
+            && sc_tick_now() - im->motion.last_inject
+               >= SC_TICK_FROM_MS(MOTION_MIN_INTERVAL_MS)) {
+        motion_flush(im);
+    }
+
     bool any = false;
     for (int i = 0; i < SC_MAX_SLIDES; i++) {
         if (im->slides[i].active) {
@@ -304,12 +327,6 @@ sc_input_manager_tick(struct sc_input_manager *im) {
 }
 
 // ==================== 鼠标位移映射（motion） ====================
-
-// A MOVE is droppable and the control queue holds 60 messages, so motion is
-// throttled instead of flooding: at most one injected MOVE every 8 ms. Deltas
-// received in between are accumulated and applied on the next injection, so
-// the total displacement still matches the mouse movement.
-#define MOTION_MIN_INTERVAL_MS 8
 
 static struct sc_mapping_entry *
 find_motion_entry(struct sc_mapping_manager *mm) {
@@ -457,8 +474,17 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
     im->motion.pend_ny += (double) yrel * im->motion.sensitivity / (double) fh;
     if (sc_tick_now() - im->motion.last_inject
             < SC_TICK_FROM_MS(MOTION_MIN_INTERVAL_MS)) {
-        return true; // keep accumulating, the next event injects the sum
+        return true; // keep accumulating; the tick flushes it on time
     }
+    motion_flush(im);
+    return true;
+}
+
+// Inject the accumulated displacement and reset the throttle clock. Shared by
+// the mouse-event path above and the time-based flush in sc_input_manager_tick()
+// so that a trailing delta never waits for another mouse event.
+static void
+motion_flush(struct sc_input_manager *im) {
     double dnx = im->motion.pend_nx;
     double dny = im->motion.pend_ny;
     im->motion.pend_nx = 0.0;
@@ -466,8 +492,8 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
     // #region debug-point B:motion-injection-attempt
     static unsigned debug_injection_seq;
     if ((++debug_injection_seq & 15) == 0) {
-        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
-             "hypothesisId=B location=input_manager.c:motion_feed "
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=post-fix "
+             "hypothesisId=B location=input_manager.c:motion_flush "
              "msg=motion-injection-sample now=%" PRItick
              " interval_us=%" PRItick " dnx=%f dny=%f",
              sc_tick_now(),
@@ -491,8 +517,8 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
         double ex = clamp01(tx);
         double ey = clamp01(ty);
         // #region debug-point D:motion-wrap
-        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=pre-fix "
-             "hypothesisId=D location=input_manager.c:motion_feed "
+        LOGW("[DEBUG] sessionId=mapping-input-stalls runId=post-fix "
+             "hypothesisId=D location=input_manager.c:motion_flush "
              "msg=motion-wrap now=%" PRItick " ex=%f ey=%f dnx=%f dny=%f",
              sc_tick_now(), ex, ey, dnx, dny);
         // #endregion
@@ -504,14 +530,13 @@ motion_feed(struct sc_input_manager *im, float xrel, float yrel) {
         im->motion.cur_ny = im->motion.anchor_ny;
         inject_touch_norm(im, AMOTION_EVENT_ACTION_DOWN, im->motion.cur_nx,
                           im->motion.cur_ny, im->motion.pointer_id);
-        return true;
+        return;
     }
 
     im->motion.cur_nx = tx;
     im->motion.cur_ny = ty;
     inject_touch_norm(im, AMOTION_EVENT_ACTION_MOVE, tx, ty,
                       im->motion.pointer_id);
-    return true;
 }
 
 // ==================== 映射激活 / 依赖 ====================
