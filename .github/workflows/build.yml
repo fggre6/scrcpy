@@ -91,38 +91,48 @@ jobs:
       - name: 编译
         run: ninja -C build
 
-      - name: 收集运行时文件
+      - name: 整理安装目录结构
         run: |
-          mkdir -p dist/scrcpy-win64
-          cp build/app/scrcpy.exe dist/scrcpy-win64/scrcpy.exe
-          cp server-artifact/scrcpy-server dist/scrcpy-win64/scrcpy-server
-          # 收集运行时需要的 MinGW DLL
-          ldd build/app/scrcpy.exe | grep -E 'ucrt64|mingw64' | awk '{print $3}' | xargs -I{} cp {} dist/scrcpy-win64/ || true
-          # 复制模板和配置
+          mkdir -p dist/dll
+          # 真正的程序和全部 DLL 一起放在硬编码的 dll\ 目录
+          cp build/app/scrcpy.exe dist/dll/scrcpy-core.exe
+          cp server-artifact/scrcpy-server dist/scrcpy-server
+          # 安装程序用根目录的 version.txt 判断全新安装/升级，不依赖注册表
+          echo "${SCRCPY_VERSION}.${{ github.run_number }}" > dist/version.txt
+          ldd build/app/scrcpy.exe | grep -E 'ucrt64|mingw64' | awk '{print $3}' | xargs -I{} cp {} dist/dll/ || true
           if [ -d templates ]; then
-            cp -r templates dist/scrcpy-win64/
+            cp -r templates dist/templates
           fi
           if [ -f scrcpy_mapping_config.json ]; then
-            cp scrcpy_mapping_config.json dist/scrcpy-win64/
+            cp scrcpy_mapping_config.json dist/
           fi
-          # 打包成 payload.zip，供启动器内嵌
-          cd dist/scrcpy-win64
-          zip -rq ../payload.zip .
-          cd ..
-          ls -lh payload.zip
+          find dist -maxdepth 2 -type f | head -20
+          test "$(find dist/dll -type f | wc -l)" -gt 0
+          echo "DLL count: $(find dist/dll -type f | wc -l)"
 
-      - name: 编译单文件启动器
+      - name: 编译目录启动器
         run: |
-          cd dist
-          # 把 payload.zip 作为二进制数据段嵌入启动器
-          objcopy -I binary -O pe-x86-64 -B i386:x86-64 payload.zip payload.o
-          gcc -O2 -s -o scrcpy-portable.exe ../windows/portable_launcher.c payload.o
-          ls -lh scrcpy-portable.exe
+          gcc -O2 -s -o dist/scrcpy.exe windows/launcher.c
+          ls -lh dist/scrcpy.exe
+
+      - name: 生成安装程序
+        run: |
+          MAKENSIS=$(command -v makensis || true)
+          if [ -z "$MAKENSIS" ]; then
+            choco install nsis -y --no-progress >/dev/null
+            MAKENSIS=$(command -v makensis || true)
+          fi
+          if [ -z "$MAKENSIS" ]; then
+            MAKENSIS="/c/Program Files (x86)/NSIS/Bin/makensis.exe"
+          fi
+          test -x "$MAKENSIS"
+          "$MAKENSIS" //DSRC_DIR="$(pwd)/dist" //DAPP_VERSION="${SCRCPY_VERSION}.${{ github.run_number }}" windows/installer.nsi
+          ls -lh scrcpy-setup.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-package
-          path: dist/scrcpy-portable.exe
+          path: scrcpy-setup.exe
 
   # ==================== 创建 Release ====================
   release:
@@ -172,11 +182,11 @@ jobs:
             - `F5`：打开/关闭内置管理面板
 
             ### 使用
-            1. 下载并双击 `scrcpy-portable.exe` 即可投屏，无需解压、无需担心 DLL 散落或缺失。
-            2. 首次运行会自动把运行文件释放到 `%LOCALAPPDATA%\scrcpy-portable\<版本哈希>\`，之后直接双击同一个 exe 即可。
-            3. 按 `F5` 打开内置管理面板编辑模板；模板和配置保存在释放出的运行目录中，同一版本内修改会保留。
+            1. 下载并双击 `scrcpy-setup.exe`。安装程序会自动判断：首次使用直接安装，已安装过则升级，无需选择。
+            2. 默认安装到 `%LOCALAPPDATA%\Programs\scrcpy`。真正的程序和全部 DLL 集中在 `dll\` 子目录，根目录只有启动器、配置和模板；不依赖 PATH 或注册表。
+            3. 升级通过目录内的 `version.txt` 自动判断，会替换程序文件和 `dll\`，但保留 `scrcpy_mapping_config.json` 与 `templates\`，按 `F5` 可继续编辑原有模板。
 
             编译时间：${{ github.event.repository.updated_at }}
           draft: false
           prerelease: false
-          files: artifacts/scrcpy-portable.exe
+          files: artifacts/scrcpy-setup.exe

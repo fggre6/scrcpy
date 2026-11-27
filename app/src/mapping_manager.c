@@ -80,6 +80,34 @@ sc_mapping_get_base_dir(void) {
     // SDL_GetBasePath() returns a pointer owned by SDL (it caches it), so it
     // must not be freed here: only the copy handed to the caller is.
     const char *base = SDL_GetBasePath();
+#ifdef _WIN32
+    // The Windows build keeps the real executable (and every DLL) in the
+    // hard-coded "dll" subdirectory. User-editable templates and config live
+    // one level above it, in the installation root. Derive that parent path
+    // from the executable location only: no environment variables, no registry.
+    if (base) {
+        char *parent = SDL_strdup(base);
+        size_t len;
+        char *sep;
+
+        if (!parent) {
+            return NULL;
+        }
+        len = strlen(parent);
+        while (len > 0 && (parent[len - 1] == '\\' || parent[len - 1] == '/')) {
+            parent[--len] = '\0';
+        }
+        sep = strrchr(parent, '\\');
+        if (!sep) {
+            sep = strrchr(parent, '/');
+        }
+        if (sep && sep != parent) {
+            sep[1] = '\0';
+            return parent;
+        }
+        SDL_free(parent);
+    }
+#endif
     if (base) {
         return SDL_strdup(base);
     }
