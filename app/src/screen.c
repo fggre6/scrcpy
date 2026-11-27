@@ -1191,7 +1191,7 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
             && (screen->im.motion.pend_nx != 0.0
                 || screen->im.motion.pend_ny != 0.0)
             && sc_tick_now() - screen->im.motion.last_inject
-               >= SC_TICK_FROM_MS(8)) {
+               >= SC_TICK_FROM_MS(MOTION_MIN_INTERVAL_MS)) {
         LOGW("[DEBUG] sessionId=mapping-input-stalls runId=post-fix "
              "hypothesisId=A location=screen.c:sc_screen_handle_event "
              "msg=overdue-motion-pending-on-video-frame now=%" PRItick

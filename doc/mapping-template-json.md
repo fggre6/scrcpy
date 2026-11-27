@@ -370,9 +370,12 @@ dny = yrel * sensitivity / frame_height
 
 - **指针 id**：使用该条目自己的分配 id（`-(4+slot)`），与滑动条目、单键条目
   互不冲突；不占用 scrcpy 保留的 `-1/-2/-3`。
-- **限流**：两次注入之间至少间隔 `8 ms`（`MOTION_MIN_INTERVAL_MS`），期间
-  的位移累加（`pend_nx/pend_ny`），到点一次性注入累加值；不会把每个鼠标
-  事件都塞进控制队列（队列上限 60 条）。
+- **限流**：两次注入之间至少间隔 `4 ms`（`MOTION_MIN_INTERVAL_MS`，250 Hz），
+  期间的位移累加（`pend_nx/pend_ny`），到点一次性注入累加值；不会把每个
+  鼠标事件都塞进控制队列（队列上限 60 条）。tick 会按时间兜底 flush，
+  所以鼠标停下时残留的尾差不会挂到下一个事件才注入。间隔越短，视角转动
+  越接近连续触摸（台阶感越弱），但控制队列压力越大；队列满时 MOVE 会被
+  丢弃（DOWN/UP 不丢），可通过 `control-queue-drop` 日志观察。
 - **光标捕获 / 隐藏**：虚拟手指按下（DOWN 成功）的同时，会对 scrcpy 窗口
   开启 SDL 相对鼠标模式（`SDL_SetWindowRelativeMouseMode`）：OS 光标被隐藏，
   并持续产生 `xrel/yrel`，**不会被显示器边缘挡住**——否则光标顶到屏幕边

@@ -17,6 +17,12 @@
 
 #include "util/tick.h"
 
+// Minimum interval between injected mouse-motion MOVEs. A MOVE is droppable
+// and the control queue holds 60 messages, so motion is throttled instead of
+// flooding: at most one MOVE every 4 ms (250 Hz), with deltas in between
+// accumulated. Shared with the frame-time diagnostic in screen.c.
+#define MOTION_MIN_INTERVAL_MS 4
+
 // Concurrent hold-to-slide instances (each holds its own pointer id)
 #define SC_MAX_SLIDES 4
 

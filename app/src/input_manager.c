@@ -105,12 +105,6 @@ inject_entry(struct sc_input_manager *im, struct sc_mapping_entry *e,
     return ok;
 }
 
-// A MOVE is droppable and the control queue holds 60 messages, so motion is
-// throttled instead of flooding: at most one injected MOVE every 8 ms. Deltas
-// received in between are accumulated and applied on the next injection, so
-// the total displacement still matches the mouse movement.
-#define MOTION_MIN_INTERVAL_MS 8
-
 // ==================== 滑动（hold-to-slide） ====================
 
 // Rate limits: a slide must not be able to flood the control queue, and a
