@@ -41,6 +41,62 @@
   }
   .side-head h1 { font-size: 13px; margin: 0; letter-spacing: .04em; }
   .side-head .hint { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .side-head.sub { border-top: 1px solid var(--line); }
+  .side-head .count {
+    margin-left: auto; font-size: 11px; color: #c9d7ea; background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- 映射列表 ---------- */
+  .maplist {
+    flex: 0 0 auto; max-height: 40vh; overflow: auto; padding: 5px;
+    border-bottom: 1px solid var(--line);
+  }
+  .maplist:empty::after {
+    content: "画面上还没有映射"; display: block; padding: 10px 8px;
+    font-size: 11.5px; color: var(--muted);
+  }
+  .mrow {
+    display: grid; grid-template-columns: 15px minmax(0, 1fr) auto auto auto;
+    gap: 6px; align-items: center; width: 100%; text-align: left;
+    padding: 4px 6px; margin-bottom: 2px; border-radius: 7px;
+    border: 1px solid transparent; background: transparent; cursor: pointer;
+  }
+  .mrow:hover { background: var(--card); border-color: var(--line); }
+  .mrow.on { background: var(--accent-soft); border-color: rgba(79, 140, 255, .55); }
+  .mrow .midx {
+    font-size: 9.5px; color: var(--muted); text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .mrow .mkey {
+    display: flex; align-items: center; gap: 5px; min-width: 0;
+    font: 700 11.5px/1.45 ui-monospace, Consolas, monospace; color: #dbe9ff;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mrow.on .mkey { color: #fff; }
+  .mrow .mkey .mdot {
+    width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--accent);
+  }
+  .mrow .mkey .mdot.motion { background: #b478ff; }
+  .mrow .mkey .mdot.virtual { background: var(--warn); }
+  .mrow .mkey .mdot.lock { background: var(--err); }
+  .mrow .mkey .mdot.mouse { background: #40d6d0; }
+  .mrow .mtag {
+    color: #9fb4d0; background: #222d3d; border: 1px solid #2f3d52;
+    border-radius: 4px; padding: 0 4px; font-size: 9.5px; white-space: nowrap;
+  }
+  .mrow .mpos {
+    font-size: 9.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .mrow .mstack {
+    font-size: 9px; font-weight: 700; color: #ffd79a;
+    background: rgba(245, 165, 36, .16); border: 1px solid rgba(245, 165, 36, .55);
+    border-radius: 999px; padding: 0 5px; line-height: 1.65; white-space: nowrap;
+  }
+  .mrow .mstack.hide { visibility: hidden; }
 
   .palette { padding: 10px; display: grid; gap: 8px; overflow: auto; }
   .pcard {
@@ -85,8 +141,32 @@
   button.ghost { background: transparent; }
   select { background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 6px; }
 
-  .viewport { flex: 1; display: grid; place-items: center; padding: 22px; overflow: auto; }
+  /* ---------- 缩放控件 ---------- */
+  .zoomctl {
+    display: flex; align-items: center; gap: 0; border: 1px solid var(--line);
+    border-radius: 7px; overflow: hidden; background: var(--panel2);
+  }
+  .zoomctl button {
+    border: 0; border-radius: 0; background: transparent; padding: 4px 8px;
+    font-size: 13px; line-height: 1.2; color: #c6d4e6;
+  }
+  .zoomctl button:hover { background: #263241; color: #fff; }
+  .zoomval {
+    min-width: 52px; text-align: center; font-size: 11.5px; color: #c9d7ea;
+    font-variant-numeric: tabular-nums; cursor: pointer; user-select: none;
+    padding: 0 2px; border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    line-height: 24px;
+  }
+  .zoomval:hover { background: #263241; color: #fff; }
+  .zoomval .fit { display: block; font-size: 9px; color: var(--muted); line-height: 1; margin-top: -4px; }
+
+  /* flex + margin:auto：画面小于视口时居中，放大超出后两端都能滚到（grid/flex
+     的 center 对齐会把溢出的左上角裁掉，导致放大后拖不到边角） */
+  .viewport { flex: 1; display: flex; padding: 22px; overflow: auto; min-height: 0; }
+  .viewport.space-ready { cursor: grab; }
+  .viewport.panning { cursor: grabbing; }
   .screen {
+    margin: auto; flex: 0 0 auto;
     position: relative; border-radius: 14px; overflow: hidden;
     background:
       radial-gradient(120% 90% at 50% 0%, #16202e 0%, #0b1017 70%),
@@ -128,7 +208,15 @@
     white-space: nowrap; backdrop-filter: blur(2px);
   }
   .w:active { cursor: grabbing; }
-  .w.sel { border-color: #6ff0c2; background: rgba(46, 204, 113, .22); color: #d6ffee; }
+  .w.sel { border-color: #6ff0c2; background: rgba(46, 204, 113, .38); color: #eafff6; z-index: 20;
+    box-shadow: 0 0 0 calc(2px * var(--z)) rgba(111, 240, 194, .7), 0 4px 14px rgba(0, 0, 0, .35); }
+  .w.dim { opacity: .35; }   /* 被选中的组件压在其它组件上时，把重叠的那些压暗 */
+  .w.hover { z-index: 15; box-shadow: 0 0 0 calc(2px * var(--z)) rgba(255, 255, 255, .55), 0 4px 14px rgba(0, 0, 0, .35); }
+  .w.flash { animation: wflash .45s ease-out 3; }
+  @keyframes wflash {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(111, 240, 194, 0); }
+    50% { box-shadow: 0 0 0 calc(9px * var(--z)) rgba(111, 240, 194, .55); }
+  }
   .w.motion { border-radius: 999px; background: rgba(180, 120, 255, .18); border-color: rgba(196, 150, 255, .9); color: #e8d8ff; }
   .w.virtual { border-style: dashed; background: rgba(245, 165, 36, .16); border-color: rgba(245, 165, 36, .85); color: #ffe6b8; }
   .w.lock { background: rgba(255, 107, 107, .16); border-color: rgba(255, 107, 107, .8); color: #ffd9d9; }
@@ -144,6 +232,7 @@
     border-radius: 50%; background: #0d1117; border: calc(2px * var(--z)) solid #6ff0c2;
     transform: translate(-50%, -50%); cursor: move; pointer-events: auto;
     box-shadow: 0 0 0 calc(3px * var(--z)) rgba(46, 204, 113, .18);
+    z-index: 30;   /* 拖动点始终压在组件之上，放大后也点得到 */
   }
   .dot.sub { border-color: #4f8cff; box-shadow: 0 0 0 calc(3px * var(--z)) rgba(79, 140, 255, .16); }
   .dot.end { border-color: #f5a524; box-shadow: 0 0 0 calc(3px * var(--z)) rgba(245, 165, 36, .18); }
@@ -224,7 +313,7 @@
   <aside class="side" id="palette">
     <div class="side-head"><h1>组件库</h1><span class="hint">拖到画面</span></div>
     <div class="palette" id="paletteList"></div>
-    <div class="side-foot">拖动组件到右侧画面即完成映射；组件名就是它绑定的按键。</div>
+    <div class="side-foot">拖动组件到右侧画面即完成映射；组件名就是它绑定的按键。<br>滚轮缩放画面：按住 <b>空格</b> 或鼠标中键可平移。</div>
   </aside>
 
   <main id="stage">
@@ -244,12 +333,12 @@
           <option value="landscape">横屏 16:9</option>
           <option value="portrait">竖屏 9:19.5</option>
         </select>
-        <select id="zoomSel" title="缩放">
-          <option value="fit">适应窗口</option>
-          <option value="0.75">75%</option>
-          <option value="1">100%</option>
-          <option value="1.25">125%</option>
-        </select>
+        <div class="zoomctl" title="滚轮缩放；按住空格或鼠标中键拖动画布">
+          <button id="zoomOut" title="缩小（-）">−</button>
+          <span class="zoomval" id="zoomVal" title="点击适应窗口（Ctrl+0）">100%</span>
+          <button id="zoomIn" title="放大（+）">＋</button>
+        </div>
+        <button id="btnZoomFit" title="适应窗口（Ctrl+0）">适应</button>
         <button id="btnBg">背景图</button>
         <button id="btnClear" class="danger">清空</button>
       </div>
@@ -271,7 +360,12 @@
   </main>
 
   <aside class="side" id="inspector">
-    <div class="side-head"><h1>属性</h1><span class="hint" id="selHint">未选中</span></div>
+    <div class="side-head">
+      <h1>映射列表</h1>
+      <span class="count" id="listCount">0</span>
+    </div>
+    <div class="maplist" id="maplist"></div>
+    <div class="side-head sub"><h1>属性</h1><span class="hint" id="selHint">未选中</span></div>
     <div id="insp"></div>
     <details class="jsonbox">
       <summary>JSON 预览（自动生成）</summary>
@@ -370,13 +464,16 @@ const ASPECTS = {
 const state = {
   template: 'my-template',
   aspect: 'landscape',
-  zoomMode: 'fit',
+  zoomMode: 'fit',   // fit | custom（滚轮/按钮缩放后转为 custom）
   zoom: 1,
   bg: '',
   grid: true,
   widgets: [],
   sel: null
 };
+
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 6;
 
 let uidSeq = 1;
 const els = new Map();     // widget id -> { root }
@@ -391,6 +488,7 @@ const inspEl = $('insp');
 const statusEl = $('status');
 const emptyEl = $('empty');
 const jsonOut = $('jsonOut');
+const maplistEl = $('maplist');
 
 const clamp01 = v => Math.min(1, Math.max(0, v));
 const round4 = v => Math.round(v * 1e4) / 1e4;
@@ -470,10 +568,7 @@ function selected() {
 // ============================================================
 function render() {
   const d = dims();
-  const z = state.zoom;
-  screenEl.style.setProperty('--z', String(z));
-  screenEl.style.width = (d.w * z) + 'px';
-  screenEl.style.height = (d.h * z) + 'px';
+  applyZoomSizes();
   linksEl.setAttribute('viewBox', '0 0 ' + d.w + ' ' + d.h);
   $('grid').classList.toggle('off', !state.grid);
   $('bgimg').style.backgroundImage = state.bg ? 'url("' + state.bg + '")' : 'none';
@@ -485,15 +580,21 @@ function render() {
 
   for (const w of state.widgets) buildWidget(w);
   drawLinks();
+  renderMapList();
   renderInspector();
   updateJSON();
   updateStatus();
+  syncZoomLabel();
 }
 
 function buildWidget(w) {
   const isSel = w.id === state.sel;
   const root = document.createElement('div');
-  root.className = 'w' + (isSel ? ' sel' : '') + clsFor(w);
+  let cls = 'w' + (isSel ? ' sel' : '') + clsFor(w);
+  // 有选中项时，把与它重合的其它组件压暗，方便看清选的是哪个
+  const selW = selected();
+  if (!isSel && selW && pairOverlaps(selW, w)) cls += ' dim';
+  root.className = cls;
   root.style.left = (w.x * 100) + '%';
   root.style.top = (w.y * 100) + '%';
   root.dataset.id = w.id;
@@ -571,6 +672,115 @@ function displayKey(w) {
   return w.key || '未命名';
 }
 
+// ============================================================
+// 映射列表（右侧）：重叠时也能精确选中
+// ============================================================
+function pointsOf(w) {
+  const pts = [[w.x, w.y]];
+  for (const p of w.positions) pts.push(p);
+  return pts;
+}
+
+// 两个映射是否“贴在一起”：起点或附加点位落在 2% 误差内
+function pairOverlaps(a, b) {
+  const A = pointsOf(a), B = pointsOf(b);
+  for (const p of A) {
+    for (const q of B) {
+      if (Math.abs(p[0] - q[0]) < 0.02 && Math.abs(p[1] - q[1]) < 0.02) return true;
+    }
+  }
+  return false;
+}
+
+function overlapCount(w) {
+  let n = 0;
+  for (const o of state.widgets) {
+    if (o.id !== w.id && pairOverlaps(w, o)) n++;
+  }
+  return n;
+}
+
+function renderMapList() {
+  const n = state.widgets.length;
+  $('listCount').textContent = n + ' 个';
+  if (!n) {
+    maplistEl.innerHTML = '';
+    return;
+  }
+  let html = '';
+  state.widgets.forEach((w, i) => {
+    const p = PRESET_BY_ID[w.preset] || { name: w.preset };
+    const shade = (w.preset === 'motion' || w.preset === 'motionAlways') ? 'motion' : w.preset;
+    const ov = overlapCount(w);
+    const pos = w.preset === 'virtual' ? '—' : w.x.toFixed(2) + ',' + w.y.toFixed(2);
+    html += '<button class="mrow' + (w.id === state.sel ? ' on' : '') + '"' +
+      ' data-id="' + w.id + '"' +
+      ' title="' + escAttr(displayKey(w) + ' · ' + p.name + ' · ' + (w.key || '') +
+        (w.preset === 'virtual' ? '' : ' · x=' + w.x.toFixed(4) + ' y=' + w.y.toFixed(4))) + '">' +
+      '<span class="midx">' + (i + 1) + '</span>' +
+      '<span class="mkey"><span class="mdot ' + shade + '"></span>' + esc(displayKey(w)) + '</span>' +
+      '<span class="mtag">' + esc(tagFor(w)) + '</span>' +
+      '<span class="mpos">' + pos + '</span>' +
+      '<span class="mstack' + (ov ? '' : ' hide') + '"' +
+        (ov ? ' title="此处共有 ' + (ov + 1) + ' 个映射叠在一起"' : '') + '>' +
+        (ov ? '重合 ' + (ov + 1) : '') + '</span>' +
+      '</button>';
+  });
+  maplistEl.innerHTML = html;
+}
+
+function selectWidget(id, flash) {
+  const w = state.widgets.find(x => x.id === id);
+  if (!w) return;
+  const changed = state.sel !== id;
+  state.sel = id;
+  if (changed) render(); else renderMapList();
+  const rec = els.get(id);
+  if (rec) {
+    if (flash) {
+      rec.root.classList.remove('flash');
+      void rec.root.offsetWidth;   // 重启动画
+      rec.root.classList.add('flash');
+    }
+  }
+  ensureVisible(w);
+  inspEl.scrollTop = 0;
+  const row = maplistEl.querySelector('.mrow.on');
+  if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+}
+
+// 选中后如果它跑到可视区外面（放大后常见），把视口滚到它附近
+function ensureVisible(w) {
+  const vp = $('viewport');
+  const vr = vp.getBoundingClientRect();
+  const sr = screenEl.getBoundingClientRect();
+  const cx = sr.left + w.x * sr.width;
+  const cy = sr.top + w.y * sr.height;
+  const pad = 70;
+  if (cx < vr.left + pad) vp.scrollLeft += cx - (vr.left + pad);
+  else if (cx > vr.right - pad) vp.scrollLeft += cx - (vr.right - pad);
+  if (cy < vr.top + pad) vp.scrollTop += cy - (vr.top + pad);
+  else if (cy > vr.bottom - pad) vp.scrollTop += cy - (vr.bottom - pad);
+}
+
+maplistEl.addEventListener('click', ev => {
+  const row = ev.target.closest('.mrow');
+  if (row) selectWidget(row.dataset.id, true);
+});
+
+maplistEl.addEventListener('pointerover', ev => {
+  const row = ev.target.closest('.mrow');
+  if (!row) return;
+  const rec = els.get(row.dataset.id);
+  if (rec && rec.root) rec.root.classList.add('hover');
+});
+maplistEl.addEventListener('pointerout', ev => {
+  const row = ev.target.closest('.mrow');
+  if (!row) return;
+  const rec = els.get(row.dataset.id);
+  if (rec && rec.root) rec.root.classList.remove('hover');
+});
+
 function drawLinks() {
   const d = dims();
   let html = '';
@@ -604,6 +814,11 @@ function updateGeom(w) {
   const fx = q('[data-num="x"]'), fy = q('[data-num="y"]');
   if (fx) fx.textContent = w.x.toFixed(4);
   if (fy) fy.textContent = w.y.toFixed(4);
+  // 列表里的坐标跟着走，避免重整列表打断悬停/动画
+  const row = maplistEl.querySelector('.mrow[data-id="' + w.id + '"] .mpos');
+  if (row && w.preset !== 'virtual') {
+    row.textContent = w.x.toFixed(2) + ',' + w.y.toFixed(2);
+  }
 }
 
 // ============================================================
@@ -648,6 +863,7 @@ function onWidgetDown(ev, w) {
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
     renderInspector();
+    renderMapList();
     updateJSON();
     updateStatus();
   };
@@ -681,6 +897,7 @@ function onSubDotDown(ev, w, index) {
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
     renderInspector();
+    renderMapList();
   };
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', up);
@@ -708,6 +925,7 @@ function onEndDotDown(ev, w) {
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
     renderInspector();
+    renderMapList();
   };
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', up);
@@ -784,6 +1002,8 @@ function renderInspector() {
       '从左边把组件拖到画面里开始配置。<br><br>' +
       '· 组件名 = 绑定的按键，选中后可在下面修改<br>' +
       '· 拖动组件调整位置（按住 <b>Shift</b> 吸附到 5% 网格）<br>' +
+      '· 多个映射位置重合时，直接点右侧<b>映射列表</b>里的一行选中<br>' +
+      '· 滚轮缩放画面做微调，按住 <b>空格</b>或鼠标中键平移<br>' +
       '· 一个按键要按多个位置：用「多点同按」，或给单点加位置<br>' +
       '· 滑动组件的橙色圆点是终点，拖它改方向与距离' +
       '</div>';
@@ -1180,7 +1400,8 @@ function updateStatus() {
       parts.push('<span class="ok">校验通过，可直接导出</span>');
     }
   }
-  parts.push('<span style="margin-left:auto">导出后放到 <b>templates/' + esc(state.template || 'default') + '.json</b>，并在 scrcpy_mapping_config.json 里设 active_template</span>');
+  parts.push('<span style="margin-left:auto">滚轮缩放画面 · 空格/中键拖动</span>');
+  parts.push('<span>导出后放到 <b>templates/' + esc(state.template || 'default') + '.json</b>，并在 scrcpy_mapping_config.json 里设 active_template</span>');
   statusEl.innerHTML = parts.join('<span style="opacity:.4">·</span>');
 }
 
@@ -1308,20 +1529,144 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
 }
 
+// ============================================================
+// 缩放与平移
+// ============================================================
+function applyZoomSizes() {
+  const d = dims();
+  screenEl.style.setProperty('--z', String(state.zoom));
+  screenEl.style.width = (d.w * state.zoom) + 'px';
+  screenEl.style.height = (d.h * state.zoom) + 'px';
+}
+
+function syncZoomLabel() {
+  $('zoomVal').textContent = Math.round(state.zoom * 100) + '%';
+  $('zoomVal').title = (state.zoomMode === 'fit' ? '已适应窗口' : '自定义缩放') +
+    ' · 滚轮缩放，点击恢复适应窗口';
+}
+
 function computeFit() {
-  if (state.zoomMode !== 'fit') return;
   const vp = $('viewport');
   const d = dims();
   const availW = vp.clientWidth - 44;
   const availH = vp.clientHeight - 44;
-  const z = Math.max(0.2, Math.min(availW / d.w, availH / d.h));
+  const z = Math.max(MIN_ZOOM, Math.min(availW / d.w, availH / d.h));
   state.zoom = Math.round(z * 100) / 100;
 }
 
-function relayout() {
+function fitZoom() {
+  state.zoomMode = 'fit';
   computeFit();
+  applyZoomSizes();
+  syncZoomLabel();
+  // 回到左上角：适应窗口后一般不需要滚动
+  const vp = $('viewport');
+  vp.scrollLeft = 0;
+  vp.scrollTop = 0;
+}
+
+/**
+ * 缩放到 z。传入 anchor（滚轮/指针事件）时，保持指针下的画面点不动。
+ * 只改画面尺寸与 --z，不重建组件：组件、圆点、连接线都按百分比/--z 布局，
+ * 因此会跟着画面一起放大缩小，拖动、吸附等交互不受影响。
+ */
+function setZoom(z, anchor) {
+  const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.round(z * 1000) / 1000));
+  if (nz === state.zoom) { state.zoomMode = 'custom'; syncZoomLabel(); return; }
+  const vp = $('viewport');
+  const vr = vp.getBoundingClientRect();
+  let rx = 0.5, ry = 0.5, ax, ay;
+  if (anchor) {
+    const r0 = screenEl.getBoundingClientRect();
+    rx = r0.width ? (anchor.clientX - r0.left) / r0.width : 0.5;
+    ry = r0.height ? (anchor.clientY - r0.top) / r0.height : 0.5;
+    ax = anchor.clientX;
+    ay = anchor.clientY;
+  } else {
+    ax = vr.left + vr.width / 2;
+    ay = vr.top + vr.height / 2;
+  }
+  state.zoom = nz;
+  state.zoomMode = 'custom';
+  applyZoomSizes();
+  if (anchor) {
+    const r1 = screenEl.getBoundingClientRect();
+    vp.scrollLeft += (r1.left + rx * r1.width) - ax;
+    vp.scrollTop += (r1.top + ry * r1.height) - ay;
+  }
+  syncZoomLabel();
+}
+
+function relayout() {
+  if (state.zoomMode === 'fit') computeFit();
   render();
 }
+
+// 滚轮缩放（Shift+滚轮横向平移）
+$('viewport').addEventListener('wheel', ev => {
+  ev.preventDefault();
+  const vp = $('viewport');
+  if (ev.shiftKey) {
+    vp.scrollLeft += (ev.deltaY || ev.deltaX);
+    return;
+  }
+  const dy = ev.deltaMode === 1 ? ev.deltaY * 16 : ev.deltaY;
+  setZoom(state.zoom * Math.exp(-dy * 0.0016), ev);
+}, { passive: false });
+
+$('zoomIn').addEventListener('click', () => setZoom(state.zoom * 1.25));
+$('zoomOut').addEventListener('click', () => setZoom(state.zoom / 1.25));
+$('zoomVal').addEventListener('click', fitZoom);
+$('btnZoomFit').addEventListener('click', fitZoom);
+
+// 平移：按住空格 + 左键拖动，或鼠标中键拖动
+let spaceDown = false;
+let panState = null;
+
+document.addEventListener('keydown', ev => {
+  if (ev.code !== 'Space') return;
+  const tag = (ev.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+  spaceDown = true;
+  if (ev.target === document.body) ev.preventDefault();
+  $('viewport').classList.add('space-ready');
+});
+document.addEventListener('keyup', ev => {
+  if (ev.code !== 'Space') return;
+  spaceDown = false;
+  if (!panState) $('viewport').classList.remove('space-ready');
+});
+
+$('viewport').addEventListener('pointerdown', ev => {
+  if (!(ev.button === 1 || (ev.button === 0 && spaceDown))) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  const vp = $('viewport');
+  panState = { x: ev.clientX, y: ev.clientY, l: vp.scrollLeft, t: vp.scrollTop, id: ev.pointerId };
+  vp.classList.add('panning');
+  try { vp.setPointerCapture(ev.pointerId); } catch (e) { /* 忽略 */ }
+}, true);
+
+$('viewport').addEventListener('mousedown', ev => {
+  if (ev.button === 1) ev.preventDefault();   // 屏蔽中键自动滚动
+});
+
+$('viewport').addEventListener('pointermove', ev => {
+  if (!panState || ev.pointerId !== panState.id) return;
+  const vp = $('viewport');
+  vp.scrollLeft = panState.l - (ev.clientX - panState.x);
+  vp.scrollTop = panState.t - (ev.clientY - panState.y);
+});
+
+function endPan() {
+  if (!panState) return;
+  panState = null;
+  const vp = $('viewport');
+  vp.classList.remove('panning');
+  if (!spaceDown) vp.classList.remove('space-ready');
+}
+$('viewport').addEventListener('pointerup', endPan);
+$('viewport').addEventListener('pointercancel', endPan);
 
 // 工具栏
 $('tplName').addEventListener('input', e => {
@@ -1332,13 +1677,8 @@ $('tplName').addEventListener('input', e => {
 $('aspectSel').addEventListener('change', e => {
   state.aspect = e.target.value;
   state.sel = null;
-  relayout();
-});
-$('zoomSel').addEventListener('change', e => {
-  const v = e.target.value;
-  state.zoomMode = v;
-  if (v !== 'fit') state.zoom = Number(v);
-  relayout();
+  fitZoom();     // 换方向后重新适应窗口，避免沿用上一个方向的缩放
+  render();
 });
 $('btnBg').addEventListener('click', () => $('fileImg').click());
 
@@ -1427,6 +1767,11 @@ document.addEventListener('keydown', ev => {
     const btn = inspEl.querySelector('[data-act="dup"]');
     if (btn) btn.click();
     return;
+  }
+  if (ev.ctrlKey || ev.metaKey) {
+    if (ev.key === '=' || ev.key === '+') { ev.preventDefault(); setZoom(state.zoom * 1.25); return; }
+    if (ev.key === '-' || ev.key === '_') { ev.preventDefault(); setZoom(state.zoom / 1.25); return; }
+    if (ev.key === '0') { ev.preventDefault(); fitZoom(); return; }
   }
   if (inField) return;
   const w = selected();
