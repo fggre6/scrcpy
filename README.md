@@ -119,7 +119,7 @@
 
 - 通用构建说明：[doc/build.md](doc/build.md)、[doc/develop.md](doc/develop.md)
 - 可视化编辑映射模板（浏览器里拖拽生成 JSON）：[tools/mapping-designer](tools/mapping-designer/README.md)，直接双击 `tools/mapping-designer/index.html`
-- 多平台正式版 CI：[build-all.yml](.github/workflows/build-all.yml)。仅在推送 `v*` tag 或手动触发时运行，编译 Linux / Windows / macOS 的 x86、x64、ARM 变体（矩阵最多并行 2 个）：`v*` tag 会发布 GitHub Release，手动触发只上传保留 3 天的 Artifact；不兼容的变体会被跳过而不阻断其余发布，每个正式版压缩包内都内置上述可视化设计器、`templates/` 与 `scrcpy_mapping_config.json`
+- 多平台正式版 CI：[build-all.yml](.github/workflows/build-all.yml)。推送 `master`、功能分支或 `v*` / `build-*` tag 时，自动编译 Linux / Windows / macOS 的 x86、x64、ARM 变体并发布 Release；不兼容的变体会被跳过而不阻断其余发布，每个正式版压缩包内都内置上述可视化设计器、`templates/` 与 `scrcpy_mapping_config.json`
 - Windows：CI 已切换到 **UCRT64**（MINGW64 已弃用）；`.NET` 管理面板相关构建使用 **PowerShell**
 - 映射条件模块的单元测试：`app/tests/test_mapping_cond.c`
 - 旧版独立 .NET 管理器源码保留在 `scrcpy-mapping-manager/`，发布包中已改用内建 F5 面板
