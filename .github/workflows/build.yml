@@ -105,6 +105,11 @@ jobs:
           if [ -f scrcpy_mapping_config.json ]; then
             cp scrcpy_mapping_config.json dist/scrcpy-win64/
           fi
+          # 内置可视化按键映射设计器（单文件离线 HTML，浏览器直接打开）
+          if [ -d tools/mapping-designer ]; then
+            mkdir -p dist/scrcpy-win64/tools
+            cp -r tools/mapping-designer dist/scrcpy-win64/tools/
+          fi
           cd dist
           zip -r scrcpy-win64.zip scrcpy-win64
 
@@ -153,6 +158,7 @@ jobs:
             - **设计模式**：投屏中按快捷键进入，点击屏幕记录位置，按按键绑定
             - **快速切换**：按快捷键弹出模板列表，鼠标悬停自动切换
             - **开关映射**：快捷键一键启用/关闭按键映射
+            - **可视化设计器**：压缩包内置 `tools/mapping-designer/index.html`，浏览器离线打开，拖拽布点即可生成映射模板 JSON
 
             ### 默认快捷键（可在 `scrcpy_mapping_config.json` 中修改）
             - `F2`：快速切换模板
@@ -164,6 +170,7 @@ jobs:
             1. 解压后运行 `scrcpy.exe` 投屏（`templates/` 与 `scrcpy_mapping_config.json` 与 exe 同级）。
             2. 按 `F5` 打开内置管理面板编辑模板。
             3. 模板文件位于 `templates/` 目录，活动模板记录在 `scrcpy_mapping_config.json`。
+            4. 不想手写坐标时，用浏览器打开 `tools/mapping-designer/index.html`：放上游戏截图背景，从组件库拖拽组件到画面上，导出 JSON 保存到 `templates/`，保存后自动热重载。
 
             ### 键盘转发开关（可选，写在 `scrcpy_mapping_config.json`）
             - `"stop_keyboard_forwarding": true`：键盘不再转发给设备（不会在手机上打字/触发设备快捷键），映射与鼠标不受影响

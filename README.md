@@ -53,6 +53,16 @@
 
 完整的字段定义、校验规则与文法见 **[映射模板 JSON 格式](doc/mapping-template-json.md)**。
 
+### 可视化映射设计器
+
+`tools/mapping-designer/index.html` 是一个**单文件、离线可用**的浏览器工具，用来可视化生成上面的映射模板 JSON，不需要手写坐标：
+
+- 把游戏截图设为背景，从左侧组件库拖拽「单点 / 滑动 / 多点同按 / 视角拖动 / 开关 / 虚拟键 / 组合键 / 鼠标键 / 条件映射」等组件到画面上，**落点就是归一化坐标**，组件名即绑定的按键。
+- 右侧属性面板调整模式、灵敏度、位移、依赖条件等；支持滚轮缩放、Shift 吸附网格、方向键微调、撤销重做，并实时预览 JSON、内置错误检查（键名重复、组合成员越界、依赖条目不存在等）。
+- 点「导出 JSON」保存为 `templates/<模板名>.json`，在 `scrcpy_mapping_config.json` 中设 `active_template` 并启用即可热重载；也可以导入已有模板继续可视化编辑。
+
+**正式版压缩包已内置该工具**，位于 `tools/mapping-designer/`，解压后用 Chrome / Edge 直接打开 `index.html` 即可，无需安装或联网。
+
 ### 模板示例
 
 ```json
@@ -118,7 +128,7 @@
 ## 构建与开发
 
 - 通用构建说明：[doc/build.md](doc/build.md)、[doc/develop.md](doc/develop.md)
-- 可视化编辑映射模板（浏览器里拖拽生成 JSON）：[tools/mapping-designer](tools/mapping-designer/README.md)，直接双击 `tools/mapping-designer/index.html`
+- 可视化编辑映射模板（浏览器里拖拽生成 JSON，正式版压缩包已内置）：[tools/mapping-designer](tools/mapping-designer/README.md)，直接双击 `tools/mapping-designer/index.html`
 - Windows：CI 已切换到 **UCRT64**（MINGW64 已弃用）；`.NET` 管理面板相关构建使用 **PowerShell**
 - 映射条件模块的单元测试：`app/tests/test_mapping_cond.c`
 - 旧版独立 .NET 管理器源码保留在 `scrcpy-mapping-manager/`，发布包中已改用内建 F5 面板
