@@ -30,14 +30,6 @@ mkdir -p "$ARCHIVE_DIR/$TARGET_DIRNAME"
 cp -r "$BUILD_DIR/dist/." "$ARCHIVE_DIR/$TARGET_DIRNAME/"
 cp "$WORK_DIR/build-server/server/scrcpy-server" "$ARCHIVE_DIR/$TARGET_DIRNAME/"
 
-# 正式版内置按键映射相关资源：
-# - tools/mapping-designer: 浏览器里拖拽生成映射模板 JSON 的可视化工具（离线、免构建）
-# - templates + scrcpy_mapping_config.json: 工具导出的模板与目标目录，开箱即用
-mkdir -p "$ARCHIVE_DIR/$TARGET_DIRNAME/tools"
-cp -r tools/mapping-designer "$ARCHIVE_DIR/$TARGET_DIRNAME/tools/mapping-designer"
-cp -r templates "$ARCHIVE_DIR/$TARGET_DIRNAME/templates"
-cp scrcpy_mapping_config.json "$ARCHIVE_DIR/$TARGET_DIRNAME/scrcpy_mapping_config.json"
-
 mkdir -p "$OUTPUT_DIR"
 
 cd "$ARCHIVE_DIR"
