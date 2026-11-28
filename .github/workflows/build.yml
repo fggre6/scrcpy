@@ -1,10 +1,9 @@
-name: Build scrcpy Windows Client
+name: Build scrcpy Windows Client (manual)
+
+# 自动多平台发布已迁移到 build-all.yml（Linux / Windows / macOS × x86 / x64 / ARM）。
+# 这里保留旧的 Windows-only 流程供按需手动触发，避免同一 push 产生两个 Release。
 
 on:
-  push:
-    branches:
-      - 'master'      # 主分支：推送后自动编译并发布
-      - 'trae/**'     # 功能分支：保留原有触发方式
   workflow_dispatch:
     inputs:
       tag_name:
