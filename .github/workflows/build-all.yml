@@ -1,27 +1,25 @@
 name: Build & Release (all platforms)
 
 # 多平台正式版构建与发布。
-# - 覆盖 Linux / Windows / macOS 的 x86、x64、ARM 变体
-# - 某个变体不兼容（无对应 runner、依赖缺失、编译失败）时只跳过该变体，不影响其它变体发布
+# - 仅 v* tag 与手动触发，避免 push 分支触发的高频运行
+# - max-parallel: 2 限制矩阵并发，降低 GitHub 风控（Abuse Detection）风险
+# - 不兼容变体只跳过，不影响其它变体
+# - v* tag: 发布 GitHub Release；手动触发: 只上传 Artifact（保留 3 天）
 # - 每个正式版压缩包都内置可视化按键映射设计器 tools/mapping-designer
 # - 旧的单平台 build.yml 已改为手动触发，避免重复创建 Release
 
 on:
   push:
-    branches:
-      - master
-      - 'trae/**'
     tags:
       - 'v*'
-      - 'build-*'
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Release 标签名（留空则自动生成 build-YYYYmmdd-HHMMSS）'
+        description: '产物版本名（留空则自动生成 build-YYYYmmdd-HHMMSS；手动触发不会创建 Release）'
         required: false
         default: ''
       prerelease:
-        description: '标记为预发布版本'
+        description: '标记为预发布版本（仅 v* tag 触发时作用于 Release）'
         required: false
         type: boolean
         default: false
@@ -34,12 +32,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # 统一版本名，保证所有产物与 Release 使用同一个标签
+  # 统一版本名，并决定本次是否发布 Release
   version:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.compute.outputs.tag }}
+      publish_release: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
+      - name: 释放 Ubuntu 磁盘空间
+        shell: bash
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          echo "=== 清理后 ==="
+          df -h /
+
       - name: 计算版本标签
         id: compute
         shell: bash
@@ -57,6 +67,11 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Release tag: $tag"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "本次为 tag 触发，将发布 Release"
+          else
+            echo "本次为手动触发，只上传 Artifact"
+          fi
 
   # Android 服务端（所有平台的客户端压缩包都要内置）
   server:
@@ -67,11 +82,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 释放 Ubuntu 磁盘空间
+        shell: bash
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          echo "=== 清理后 ==="
+          df -h /
+
       - name: 安装 Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: 缓存 Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            server/.gradle
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'gradle.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       - name: 编译 scrcpy-server
         shell: bash
@@ -88,7 +125,7 @@ jobs:
         with:
           name: scrcpy-server
           path: release/work/build-server/server/scrcpy-server
-          retention-days: 7
+          retention-days: 3
 
   # 平台变体矩阵。skip=true 的变体在预检阶段直接跳过；
   # continue-on-error=true 保证任一变体失败不会阻断其它变体与最终发布。
@@ -98,6 +135,8 @@ jobs:
     continue-on-error: true
     strategy:
       fail-fast: false
+      # 严格限制同时运行的虚拟机数量，避免触发 GitHub 风控
+      max-parallel: 2
       matrix:
         include:
           # ---------------- Linux ----------------
@@ -172,6 +211,29 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - name: 释放 Ubuntu 磁盘空间
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          echo "=== 清理后 ==="
+          df -h /
+
+      # 缓存下载好的源码与已安装的依赖，避免每次重复下载
+      - name: 缓存平台编译依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            app/deps/work/sources
+            app/deps/work/install
+          key: deps-${{ matrix.target }}-${{ hashFiles('app/deps/*.sh', 'app/deps/patches/**', 'cross_win*.txt', 'meson.build', 'meson_options.txt') }}
+          restore-keys: |
+            deps-${{ matrix.target }}-
+
       # 必须先于任何使用 msys2 shell 的步骤
       - name: 安装依赖（MSYS2 / Windows ARM64）
         if: matrix.family == 'windows-arm'
@@ -241,15 +303,26 @@ jobs:
           name: release-${{ matrix.target }}
           path: release/output/scrcpy-${{ matrix.target }}-${{ needs.version.outputs.tag }}.${{ matrix.format }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
-  # 汇总所有成功构建的变体并发布
+  # 汇总所有成功构建的变体；只有 v* tag 触发才创建 Release
   release:
     needs: [version, server, build]
     if: always() && needs.version.result == 'success' && needs.server.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: 释放 Ubuntu 磁盘空间
+        shell: bash
+        run: |
+          echo "=== 清理前 ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/share/swift 2>/dev/null || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+          echo "=== 清理后 ==="
+          df -h /
 
       - name: 下载所有正式版压缩包
         uses: actions/download-artifact@v4
@@ -330,7 +403,8 @@ jobs:
 
           cat release/RELEASE_BODY.md
 
-      - name: 创建 Release 并推送
+      - name: 创建 Release 并推送（仅 v* tag 触发）
+        if: needs.version.outputs.publish_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.version.outputs.tag }}
@@ -338,3 +412,20 @@ jobs:
           body_path: release/RELEASE_BODY.md
           prerelease: ${{ inputs.prerelease || false }}
           files: release/output/*
+
+      - name: 手动触发：汇总 Artifact
+        if: needs.version.outputs.publish_release != 'true'
+        shell: bash
+        run: |
+          {
+            echo "### 手动构建完成（未创建 Release）"
+            echo
+            echo "版本：\`${{ needs.version.outputs.tag }}\`"
+            echo
+            echo "压缩包已作为 Actions Artifact 上传，保留 3 天："
+            echo
+            shopt -s nullglob
+            for f in release/output/*; do
+              echo "- \`$(basename "$f")\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
